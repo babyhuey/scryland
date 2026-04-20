@@ -125,6 +125,15 @@ class InventoryDB:
         if "marketplace" not in existing_sales_cols:
             self.conn.execute("ALTER TABLE sales ADD COLUMN marketplace TEXT DEFAULT 'tcgplayer'")
             logger.info("DB migration: added sales.marketplace column")
+        # Backfill: rows inserted before the marketplace column existed,
+        # or eBay rows written before `_marketplace` was plumbed through,
+        # can be identified by the EBAY- prefix `order_to_sales_rows` adds.
+        fixed = self.conn.execute(
+            "UPDATE sales SET marketplace='ebay' "
+            "WHERE marketplace='tcgplayer' AND order_number LIKE 'EBAY-%'"
+        ).rowcount
+        if fixed:
+            logger.info("DB migration: reclassified %d EBAY-* rows as marketplace=ebay", fixed)
         existing_ph_cols = {
             row["name"] for row in self.conn.execute("PRAGMA table_info(price_history)").fetchall()
         }
