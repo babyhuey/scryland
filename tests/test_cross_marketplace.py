@@ -34,6 +34,14 @@ class TestCanonicalKey:
         b = canonical_key("Hop to It", "Near Mint", False)
         assert a == b
 
+    def test_dfc_front_face_matches_full_name(self):
+        """TCG scrape returns just the front face ("Grave Researcher") while
+        eBay listings use the full "Front // Back" form — the key must
+        collapse both to the same value for cross-marketplace delist."""
+        front = canonical_key("Grave Researcher", "Near Mint", False)
+        full = canonical_key("Grave Researcher // Reanimate", "Near Mint", False)
+        assert front == full
+
     def test_strips_foil_from_condition(self):
         """condition can come in as 'Near Mint Foil' from TCG and 'Near Mint' from eBay."""
         a = canonical_key("Hop to It", "Near Mint Foil", True)

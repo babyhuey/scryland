@@ -159,7 +159,7 @@ class InventoryDB:
 
     # Version of the canonical_key formula. Bumped when we change the
     # canonical_key composition. Stored as PRAGMA user_version.
-    _CANONICAL_KEY_VERSION = 2
+    _CANONICAL_KEY_VERSION = 3
 
     def _recompute_ebay_canonical_keys(self) -> None:
         """Re-derive canonical_key on ebay_listings rows when the formula bumped.
@@ -991,12 +991,16 @@ def _escape_like(s: str) -> str:
 
 
 def _norm_name(s: str) -> str:
+    # Collapse DFCs to the front face — TCG scrape returns just the front
+    # ("Grave Researcher") while eBay listings + Scryfall use the full
+    # "Front // Back" form, which would otherwise prevent cross-match.
+    front = s.split("//")[0]
     # Strip parenthetical treatments ("(Borderless)", "(Extended Art)") and
     # drop non-alphanumeric, collapse whitespace.
-    core = s.split("(")[0].strip().lower()
+    core = front.split("(")[0].strip().lower()
     allowed = []
     for ch in core:
-        if ch.isalnum() or ch.isspace() or ch == "/":
+        if ch.isalnum() or ch.isspace():
             allowed.append(ch)
         else:
             allowed.append(" ")
