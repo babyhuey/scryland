@@ -23,7 +23,7 @@ repos:
       - id: mypy
         additional_dependencies:
           - pydantic>=2.0
-          - pydantic-settings>=2.0
+          - pydantic-settings>=2.13.1
           - types-requests
         args: [--ignore-missing-imports, --no-strict-optional, src/scryland]
         pass_filenames: false
