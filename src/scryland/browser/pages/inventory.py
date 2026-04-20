@@ -17,6 +17,17 @@ from scryland.models import Listing
 logger = logging.getLogger("scryland")
 
 
+def _norm_name_for_match(s: str) -> str:
+    """Mirror of db._norm_name for fuzzy product-name matching in the
+    browser. Keeps the two implementations in sync — any edit here should
+    be reflected in the JS `norm` in click_manage_for_product and in
+    db._norm_name."""
+    front = s.split("//")[0]
+    core = front.split("(")[0].strip().lower()
+    allowed = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in core)
+    return " ".join(allowed.split())
+
+
 def _parse_price(text: str | None) -> Decimal | None:
     """Parse a price string like '$20.34' or '$20.34 + Shipping: $0.99' into a Decimal.
 
@@ -144,12 +155,26 @@ class InventoryPage:
         return all_products
 
     async def click_manage_for_product(self, product_name: str) -> None:
-        """Click the Manage button for a product, paginating until found."""
+        """Click the Manage button for a product, paginating until found.
+
+        Match is fuzzy: normalize DFC ("Front // Back" → "front") and strip
+        parenthetical treatments ("(Borderless)") on both sides so the
+        scrape-time name and the current TCG display can still match when
+        one side carries the suffix and the other doesn't.
+        """
         max_pages = 100
+        target_norm = _norm_name_for_match(product_name)
         for _ in range(max_pages):
             clicked = await retry_on_flaky(
                 lambda: self._page.evaluate(
-                    """(targetName) => {
+                    """([targetNorm]) => {
+                    const norm = (s) => {
+                        s = (s || '').split('//')[0];
+                        s = s.split('(')[0];
+                        s = s.toLowerCase();
+                        s = s.replace(/[^a-z0-9\\s]/g, ' ');
+                        return s.replace(/\\s+/g, ' ').trim();
+                    };
                     const elements = document.querySelectorAll('a, button, input');
                     for (const el of elements) {
                         const text = (el.textContent || el.value || '').trim();
@@ -158,14 +183,14 @@ class InventoryPage:
                         if (!row) continue;
                         const cells = row.querySelectorAll('td');
                         const name = cells.length >= 3 ? cells[2].innerText.trim() : '';
-                        if (name === targetName) {
+                        if (norm(name) === targetNorm) {
                             el.click();
                             return true;
                         }
                     }
                     return false;
                 }""",
-                    product_name,
+                    [target_norm],
                 ),
                 page=self._page,
                 label=f"click_manage_for_product({product_name!r})",

@@ -173,11 +173,30 @@ async def _end_tcg_listing_by_canonical(session, config, db, canonical_key: str)
             page=session.page,
             label="delist: inventory.navigate",
         )
-        await retry_on_flaky(
-            lambda: inventory_page.click_manage_for_product(row["product_name"]),
-            page=session.page,
-            label="delist: click_manage",
-        )
+        from scryland.exceptions import SelectorNotFoundError
+
+        try:
+            await retry_on_flaky(
+                lambda: inventory_page.click_manage_for_product(row["product_name"]),
+                page=session.page,
+                label="delist: click_manage",
+            )
+        except SelectorNotFoundError:
+            # Listing isn't on TCG anymore — user ended it manually, it
+            # sold through TCG earlier, or a sync lag left our row stale.
+            # Either way, the reconcile goal ("make sure it's not live on
+            # TCG") is already satisfied. Mark our inventory row removed
+            # so we stop retrying on every sweep.
+            console.print(
+                f"  [dim]TCG listing for '{row['product_name']}' already gone — "
+                f"marking reconciled.[/dim]"
+            )
+            db.conn.execute(
+                "UPDATE inventory SET status = 'removed' WHERE id = ?",
+                (row["id"],),
+            )
+            db.conn.commit()
+            return True
         # Ensure the manage page is fully loaded before we touch the table.
         try:
             await session.page.wait_for_load_state(

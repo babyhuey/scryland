@@ -2,7 +2,19 @@
 
 from decimal import Decimal
 
-from scryland.browser.pages.inventory import _parse_price
+from scryland.browser.pages.inventory import _norm_name_for_match, _parse_price
+
+
+class TestNormNameForMatch:
+    def test_collapses_dfc_to_front_face(self):
+        assert _norm_name_for_match("Grave Researcher // Reanimate") == "grave researcher"
+        assert _norm_name_for_match("Grave Researcher") == "grave researcher"
+
+    def test_strips_parenthetical(self):
+        assert _norm_name_for_match("Hop to It (Borderless)") == "hop to it"
+
+    def test_case_and_punctuation(self):
+        assert _norm_name_for_match("Forum's Favor!") == "forum s favor"
 
 
 class TestParsePrice:
