@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# Scryland session data (contains cookies - never commit)
+.scryland_session/
+
+# Encrypted credentials (never commit)
+.scryland_credentials
+.scryland_ebay_credentials
+.scryland_salt
+
+# Inventory database
+*.db
+
+# Snapshots from explore command
+snapshots/
+
+# Environment
+.env
+.scryland_ebay_consent_url.txt
+
+# Ruff
+.ruff_cache/
+
+# Personal card data / inventory exports (never commit)
+*.csv
+cards.txt
+combine_csvs.py
+!tests/**/*.csv
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# OS
+.DS_Store
+Thumbs.db
