@@ -22,7 +22,7 @@ repos:
     hooks:
       - id: mypy
         additional_dependencies:
-          - pydantic>=2.0
+          - pydantic>=2.13.2
           - pydantic-settings>=2.0
           - types-requests
         args: [--ignore-missing-imports, --no-strict-optional, src/scryland]
