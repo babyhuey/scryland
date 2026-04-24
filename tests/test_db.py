@@ -56,6 +56,41 @@ class TestUpsertListing:
         active = db.get_all_active()
         assert len(active) == 2
 
+    def test_dfc_front_face_dedups_to_existing_full_form(self, db):
+        full = _make_listing(product_name="Grave Researcher // Reanimate")
+        front = _make_listing(product_name="Grave Researcher")
+        assert db.upsert_listing(full) is True
+        assert db.upsert_listing(front) is False
+        db.conn.commit()
+
+        active = db.get_all_active()
+        assert len(active) == 1
+        # Richer name preserved — not downgraded to front-face form.
+        assert active[0]["product_name"] == "Grave Researcher // Reanimate"
+
+    def test_dfc_full_form_upgrades_existing_front_face(self, db):
+        front = _make_listing(product_name="Grave Researcher")
+        full = _make_listing(product_name="Grave Researcher // Reanimate")
+        assert db.upsert_listing(front) is True
+        assert db.upsert_listing(full) is False
+        db.conn.commit()
+
+        active = db.get_all_active()
+        assert len(active) == 1
+        assert active[0]["product_name"] == "Grave Researcher // Reanimate"
+
+    def test_parenthetical_printings_stay_distinct(self, db):
+        # "(Borderless)" is a separate printing — must NOT collapse into
+        # the base printing during upsert dedup.
+        base = _make_listing(product_name="Hop to It")
+        borderless = _make_listing(product_name="Hop to It (Borderless)")
+        assert db.upsert_listing(base) is True
+        assert db.upsert_listing(borderless) is True
+        db.conn.commit()
+
+        active = db.get_all_active()
+        assert len(active) == 2
+
 
 class TestGetAllActive:
     def test_returns_active_only(self, db):

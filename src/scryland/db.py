@@ -245,10 +245,31 @@ class InventoryDB:
 
         # Check if it already exists
         existing = self.conn.execute(
-            "SELECT id, current_price, quantity, status FROM inventory "
+            "SELECT id, current_price, quantity, status, product_name FROM inventory "
             "WHERE product_name = ? AND condition = ? AND finish = ?",
             (listing.product_name, listing.condition, finish),
         ).fetchone()
+
+        # DFC fallback: TCG sometimes scrapes the front-face only
+        # ("Grave Researcher") and sometimes the full form ("Grave
+        # Researcher // Reanimate"). Without this, two rows accumulate for
+        # the same physical listing, breaking find_inventory_by_canonical
+        # (which then refuses to auto-delist as ambiguous). Only collapses
+        # rows that match by DFC front-face — parentheticals like
+        # "(Borderless)" stay distinct, since they really are separate
+        # printings.
+        if not existing:
+            target_front = _dfc_front_key(listing.product_name)
+            if target_front:
+                candidates = self.conn.execute(
+                    "SELECT id, current_price, quantity, status, product_name "
+                    "FROM inventory WHERE condition = ? AND finish = ?",
+                    (listing.condition, finish),
+                ).fetchall()
+                for cand in candidates:
+                    if _dfc_front_key(cand["product_name"]) == target_front:
+                        existing = cand
+                        break
 
         if existing:
             # Update existing
@@ -266,12 +287,22 @@ class InventoryDB:
             if old_price and abs(old_price - float(listing.current_price)) > 0.001:
                 updates["last_price_change"] = now
 
+            # If the new scrape carries the full DFC form ("X // Y") and
+            # the existing row only has the front face, upgrade the name —
+            # downstream canonical-key lookups match better against the
+            # full form (which is what eBay/Scryfall use). Never downgrade
+            # a richer name to a shorter one.
+            new_name = existing["product_name"]
+            if "//" in listing.product_name and "//" not in (existing["product_name"] or ""):
+                new_name = listing.product_name
+
             self.conn.execute(
                 "UPDATE inventory SET "
-                "quantity=?, current_price=?, tcg_low_price=?, market_price=?, "
+                "product_name=?, quantity=?, current_price=?, tcg_low_price=?, market_price=?, "
                 "last_seen=?, status=?, set_name=?, last_price_change=COALESCE(?, last_price_change) "
                 "WHERE id=?",
                 (
+                    new_name,
                     updates["quantity"],
                     updates["current_price"],
                     updates["tcg_low_price"],
@@ -988,6 +1019,16 @@ def _escape_like(s: str) -> str:
     """Escape SQL LIKE-wildcard chars so user input can't expand the match.
     Use with `LIKE ? ESCAPE '\\\\'`."""
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _dfc_front_key(s: str) -> str:
+    """DFC-only collapse for upsert dedup: strip the "// Back" half but
+    KEEP parentheticals like "(Borderless)" — those mark genuinely
+    different printings that must remain distinct rows. Narrower than
+    _norm_name on purpose."""
+    if not s:
+        return ""
+    return " ".join(s.split("//")[0].strip().lower().split())
 
 
 def _norm_name(s: str) -> str:
