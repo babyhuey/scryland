@@ -189,9 +189,7 @@ async def _end_tcg_listing_by_canonical(session, config, db, canonical_key: str)
             # conclusion here silently leaves the TCG listing live and has
             # caused cross-sell incidents in the past, so be conservative:
             # only trust absence when verified.
-            verified_absent = await inventory_page.verify_product_absent(
-                row["product_name"]
-            )
+            verified_absent = await inventory_page.verify_product_absent(row["product_name"])
             if verified_absent:
                 console.print(
                     f"  [dim]TCG listing for '{row['product_name']}' verified "
