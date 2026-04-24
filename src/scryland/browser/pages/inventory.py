@@ -23,6 +23,12 @@ def _norm_name_for_match(s: str) -> str:
     be reflected in the JS `norm` in click_manage_for_product and in
     db._norm_name."""
     front = s.split("//")[0]
+    # Drop a "<set-prefix>: " preamble if present — TCG labels some rows
+    # like "Mystical Archive: Reprieve" while our stored name for the same
+    # printing can be just "Reprieve". Strip symmetrically so both forms
+    # collapse to the card name.
+    if ": " in front:
+        front = front.rsplit(": ", 1)[1]
     core = front.split("(")[0].strip().lower()
     allowed = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in core)
     return " ".join(allowed.split())
@@ -157,10 +163,14 @@ class InventoryPage:
     async def click_manage_for_product(self, product_name: str) -> None:
         """Click the Manage button for a product, paginating until found.
 
-        Match is fuzzy: normalize DFC ("Front // Back" → "front") and strip
-        parenthetical treatments ("(Borderless)") on both sides so the
-        scrape-time name and the current TCG display can still match when
-        one side carries the suffix and the other doesn't.
+        Match tiers (first hit wins, per page):
+          1. Exact normalized equality.
+          2. Same, after stripping a "<prefix>: " preamble from the cell
+             (TCG labels some rows like "Mystical Archive: Reprieve"
+             while our stored name may just be "Reprieve").
+          3. Token-suffix: the cell's last N tokens equal the target's
+             N tokens. Suffix (not substring) avoids false positives like
+             matching "Reprieve's Haunt" for target "reprieve".
         """
         max_pages = 100
         target_norm = _norm_name_for_match(product_name)
@@ -168,13 +178,25 @@ class InventoryPage:
             clicked = await retry_on_flaky(
                 lambda: self._page.evaluate(
                     """([targetNorm]) => {
-                    const norm = (s) => {
+                    const normBase = (s) => {
                         s = (s || '').split('//')[0];
                         s = s.split('(')[0];
                         s = s.toLowerCase();
                         s = s.replace(/[^a-z0-9\\s]/g, ' ');
                         return s.replace(/\\s+/g, ' ').trim();
                     };
+                    const normStripPrefix = (s) => {
+                        s = (s || '').split('//')[0];
+                        if (s.indexOf(': ') !== -1) {
+                            const parts = s.split(': ');
+                            s = parts[parts.length - 1];
+                        }
+                        s = s.split('(')[0];
+                        s = s.toLowerCase();
+                        s = s.replace(/[^a-z0-9\\s]/g, ' ');
+                        return s.replace(/\\s+/g, ' ').trim();
+                    };
+                    const targetTokens = targetNorm.split(' ').filter(Boolean);
                     const elements = document.querySelectorAll('a, button, input');
                     for (const el of elements) {
                         const text = (el.textContent || el.value || '').trim();
@@ -183,9 +205,19 @@ class InventoryPage:
                         if (!row) continue;
                         const cells = row.querySelectorAll('td');
                         const name = cells.length >= 3 ? cells[2].innerText.trim() : '';
-                        if (norm(name) === targetNorm) {
-                            el.click();
-                            return true;
+                        const exact = normBase(name);
+                        if (exact === targetNorm) { el.click(); return true; }
+                        const stripped = normStripPrefix(name);
+                        if (stripped === targetNorm) { el.click(); return true; }
+                        // Tier 3: token-suffix match on the base-normalized name.
+                        const cellTokens = exact.split(' ').filter(Boolean);
+                        if (targetTokens.length > 0 && cellTokens.length >= targetTokens.length) {
+                            let ok = true;
+                            const offset = cellTokens.length - targetTokens.length;
+                            for (let i = 0; i < targetTokens.length; i++) {
+                                if (cellTokens[offset + i] !== targetTokens[i]) { ok = false; break; }
+                            }
+                            if (ok) { el.click(); return true; }
                         }
                     }
                     return false;
@@ -211,6 +243,52 @@ class InventoryPage:
                 )
 
         raise SelectorNotFoundError(f"Product '{product_name}' not found in inventory")
+
+    async def verify_product_absent(self, product_name: str) -> bool:
+        """Positive-signal check: True iff the product is genuinely absent.
+
+        Uses the inventory search box to query by the card's normalized
+        name, then counts Manage buttons on the first page of results.
+        Zero Manage buttons = genuinely absent. Any result rows = present
+        under some label (don't trust the caller's "not found" claim).
+        Returns False on any error so the caller stays conservative.
+        """
+        target_norm = _norm_name_for_match(product_name)
+        if not target_norm:
+            return False
+        try:
+            search_input = self._page.locator(Selectors.SEARCH_INPUT)
+            if await search_input.count() == 0:
+                # No search box (e.g., on a manage page) — navigate back first.
+                await self.navigate()
+                search_input = self._page.locator(Selectors.SEARCH_INPUT)
+                if await search_input.count() == 0:
+                    return False
+            await search_input.fill(target_norm)
+            search_btn = self._page.locator(Selectors.SEARCH_BUTTON)
+            await search_btn.click()
+            await self._page.wait_for_load_state("networkidle", timeout=15000)
+            # One short settle for the table to re-render with results.
+            await self._page.wait_for_timeout(500)
+            manage_count = await self._page.evaluate(
+                """() => {
+                    let n = 0;
+                    const els = document.querySelectorAll('a, button, input');
+                    for (const el of els) {
+                        const text = (el.textContent || el.value || '').trim();
+                        if (text === 'Manage') n += 1;
+                    }
+                    return n;
+                }"""
+            )
+            return manage_count == 0
+        except Exception:
+            logger.warning(
+                "verify_product_absent failed for %r — treating as unverified",
+                product_name,
+                exc_info=True,
+            )
+            return False
 
     async def go_back_to_inventory(self, reapply_filter: bool = True) -> None:
         """Go back to inventory list.
