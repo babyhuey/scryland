@@ -182,21 +182,34 @@ async def _end_tcg_listing_by_canonical(session, config, db, canonical_key: str)
                 label="delist: click_manage",
             )
         except SelectorNotFoundError:
-            # Listing isn't on TCG anymore — user ended it manually, it
-            # sold through TCG earlier, or a sync lag left our row stale.
-            # Either way, the reconcile goal ("make sure it's not live on
-            # TCG") is already satisfied. Mark our inventory row removed
-            # so we stop retrying on every sweep.
+            # Matcher couldn't locate a Manage row under any of its three
+            # tiers. Before marking the local row removed, require a
+            # positive-absence signal — use the inventory search box to
+            # confirm zero Manage buttons match the name. A false "absent"
+            # conclusion here silently leaves the TCG listing live and has
+            # caused cross-sell incidents in the past, so be conservative:
+            # only trust absence when verified.
+            verified_absent = await inventory_page.verify_product_absent(
+                row["product_name"]
+            )
+            if verified_absent:
+                console.print(
+                    f"  [dim]TCG listing for '{row['product_name']}' verified "
+                    f"absent — marking reconciled.[/dim]"
+                )
+                db.conn.execute(
+                    "UPDATE inventory SET status = 'removed' WHERE id = ?",
+                    (row["id"],),
+                )
+                db.conn.commit()
+                return True
             console.print(
-                f"  [dim]TCG listing for '{row['product_name']}' already gone — "
-                f"marking reconciled.[/dim]"
+                f"  [red]TCG delist: couldn't find Manage row for "
+                f"'{row['product_name']}' and absence UNVERIFIED — listing "
+                f"may still be live under a different label. Will retry "
+                f"next sweep; resolve manually if persistent.[/red]"
             )
-            db.conn.execute(
-                "UPDATE inventory SET status = 'removed' WHERE id = ?",
-                (row["id"],),
-            )
-            db.conn.commit()
-            return True
+            return False
         # Ensure the manage page is fully loaded before we touch the table.
         try:
             await session.page.wait_for_load_state(
