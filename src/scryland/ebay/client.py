@@ -871,8 +871,6 @@ class EbayClient:
         # Retry on 5xx and on errorId 25001 ("Internal Server Error" /
         # "Core Inventory Service internal error") which eBay returns
         # with status 400 OR 500 transiently.
-        import asyncio
-
         attempts = 4
         backoff_s = 2.0
         for attempt in range(1, attempts + 1):
@@ -885,10 +883,11 @@ class EbayClient:
             if r.status_code < 300:
                 break
             body_lower = r.text.lower() if r.text else ""
-            is_eventual_error = (
-                '"errorid":25001' in body_lower
-                or "core inventory service internal error" in body_lower
-            )
+            # \b prevents 25001 from matching 250010 etc. if eBay ever
+            # widens its error-ID space.
+            is_eventual_error = bool(
+                re.search(r'"errorid":\s*25001\b', body_lower)
+            ) or "core inventory service internal error" in body_lower
             is_retryable = r.status_code >= 500 or r.status_code == 429 or is_eventual_error
             if not is_retryable or attempt == attempts:
                 raise RuntimeError(
@@ -1036,9 +1035,9 @@ class EbayClient:
             # eventually-consistent, so the availability data from our PUT
             # sometimes hasn't propagated to publish yet.
             body_lower = r.text.lower() if r.text else ""
-            is_eventual_consistency = (
-                r.status_code == 400
-                and ('"errorid":25604' in body_lower or "availability not found" in body_lower)
+            is_eventual_consistency = r.status_code == 400 and (
+                bool(re.search(r'"errorid":\s*25604\b', body_lower))
+                or "availability not found" in body_lower
             )
             is_retryable = (
                 r.status_code >= 500 or r.status_code == 429 or is_eventual_consistency

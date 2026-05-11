@@ -700,6 +700,7 @@ async def _ebay_watch_pass(
                 market_low: float
                 reason: str = "market_below_floor"  # or "uncompetitive_vs_tcg"
                 tcg_price: float | None = None
+                our_price: float | None = None
 
             planned_updates: list[_PlannedUpdate] = []
             planned_withdraws: list[_PlannedWithdraw] = []
@@ -740,6 +741,7 @@ async def _ebay_watch_pass(
                                     market_low=float(lowest),
                                     reason="uncompetitive_vs_tcg",
                                     tcg_price=float(tcg_price),
+                                    our_price=float(current),
                                 )
                             )
                             continue
@@ -857,7 +859,7 @@ async def _ebay_watch_pass(
                 if p.reason == "uncompetitive_vs_tcg":
                     console.print(
                         f"    [red]{p.lst['product_name'][:40]} "
-                        f"our ${(p.lst['price'] or 0):.2f} vs TCG "
+                        f"our ${(p.our_price or 0):.2f} vs TCG "
                         f"${p.tcg_price:.2f} (gap >${delist_uncompetitive_gap:.2f}) "
                         f"— withdrew listing[/red]"
                     )
@@ -3204,10 +3206,6 @@ def add_inventory(
                 f"[red]{failed} failed[/red]"
             )
 
-            # Focused "not added" list — everything that didn't list,
-            # excluding the intentional below-min-price drops. Helps the
-            # user see at a glance which cards still need attention without
-            # scanning the full per-card summary above.
             success_statuses = {"added", "added (manual)", "verified (not saved)"}
             not_added = [
                 r for r in results

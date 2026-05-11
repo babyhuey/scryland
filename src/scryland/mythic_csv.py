@@ -121,6 +121,12 @@ def write_priced_csv(
     overwritten — "Price (USD Foil)" / "Price (USD Etched)" / "Price (USD)".
 
     Returns the number of rows updated.
+
+    Note: the override key is (card_name, condition, finish) only — it
+    intentionally does NOT include set/printing because that matches what
+    `merge_duplicates` collapses on. If the source CSV contains the same
+    name+condition+finish across multiple sets (alt-art reprints, different
+    printings), every matching row gets the same TCG-found price written.
     """
     with open(input_path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)

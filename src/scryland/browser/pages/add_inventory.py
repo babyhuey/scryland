@@ -105,9 +105,8 @@ class AddInventoryPage:
             logger.debug("Skipping set filter (caller requested name-only search)")
         try:
             if not apply_set_filter:
-                # Reset the set dropdown to "All Sets" — leftover state from
-                # a previous search would otherwise restrict our retry to the
-                # wrong set and reproduce the same 0-results failure.
+                # Leftover dropdown state from a previous search would
+                # silently re-restrict the retry to the wrong set.
                 await self._page.evaluate(
                     """() => {
                         const sel = document.querySelector('#SetNameId');
@@ -119,51 +118,51 @@ class AddInventoryPage:
                 selected_set = None
             else:
                 selected_set = await self._page.evaluate(
-                """(targetSet) => {
-                const sel = document.querySelector('#SetNameId');
-                if (!sel) return null;
-                const options = Array.from(sel.options);
-                const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-                const target = norm(targetSet);
-                const targetWords = new Set(target.split(' ').filter(w => w.length >= 3));
+                    """(targetSet) => {
+                    const sel = document.querySelector('#SetNameId');
+                    if (!sel) return null;
+                    const options = Array.from(sel.options);
+                    const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+                    const target = norm(targetSet);
+                    const targetWords = new Set(target.split(' ').filter(w => w.length >= 3));
 
-                // 1. Exact (normalized) match
-                for (const opt of options) {
-                    if (norm(opt.text) === target) {
-                        sel.value = opt.value;
+                    // 1. Exact (normalized) match
+                    for (const opt of options) {
+                        if (norm(opt.text) === target) {
+                            sel.value = opt.value;
+                            sel.dispatchEvent(new Event('change', { bubbles: true }));
+                            return opt.text;
+                        }
+                    }
+                    // 2. Substring match (either direction) on normalized form
+                    for (const opt of options) {
+                        const o = norm(opt.text);
+                        if (o.includes(target) || target.includes(o)) {
+                            sel.value = opt.value;
+                            sel.dispatchEvent(new Event('change', { bubbles: true }));
+                            return opt.text;
+                        }
+                    }
+                    // 3. Word-overlap fallback: 2+ significant shared words
+                    let best = null, bestScore = 0;
+                    for (const opt of options) {
+                        const words = new Set(norm(opt.text).split(' ').filter(w => w.length >= 3));
+                        let common = 0;
+                        for (const w of targetWords) if (words.has(w)) common++;
+                        if (common > bestScore && common >= 2) {
+                            bestScore = common;
+                            best = opt;
+                        }
+                    }
+                    if (best) {
+                        sel.value = best.value;
                         sel.dispatchEvent(new Event('change', { bubbles: true }));
-                        return opt.text;
+                        return best.text;
                     }
-                }
-                // 2. Substring match (either direction) on normalized form
-                for (const opt of options) {
-                    const o = norm(opt.text);
-                    if (o.includes(target) || target.includes(o)) {
-                        sel.value = opt.value;
-                        sel.dispatchEvent(new Event('change', { bubbles: true }));
-                        return opt.text;
-                    }
-                }
-                // 3. Word-overlap fallback: 2+ significant shared words
-                let best = null, bestScore = 0;
-                for (const opt of options) {
-                    const words = new Set(norm(opt.text).split(' ').filter(w => w.length >= 3));
-                    let common = 0;
-                    for (const w of targetWords) if (words.has(w)) common++;
-                    if (common > bestScore && common >= 2) {
-                        bestScore = common;
-                        best = opt;
-                    }
-                }
-                if (best) {
-                    sel.value = best.value;
-                    sel.dispatchEvent(new Event('change', { bubbles: true }));
-                    return best.text;
-                }
-                return null;
-            }""",
-                card.set_name,
-            )
+                    return null;
+                }""",
+                    card.set_name,
+                )
             if selected_set:
                 logger.debug("Set filter to '%s'", selected_set)
                 try:
