@@ -32,6 +32,7 @@ Built because I got tired of manually retrimming 80+ listings every morning.
 - **`scryland list-on-ebay cards.csv`** — publishes a Mythic Tools CSV to eBay with correct condition descriptors, Scryfall images, proper item specifics, and a Browse-API undercut.
 - **`scryland watch -i 60`** — runs the full cross-marketplace loop every 60 min: TCG optimize → TCG sales check → eBay undercut sweep → eBay sales check → **auto-delist on the other side when something sells**.
 - **`scryland watch --ebay-only`** — faster API-only loop. Lazy-spawns a browser only when something needs delisted on TCG.
+- **`scryland watch --ebay-delist-uncompetitive-gap 0.50`** — also withdraw eBay listings whose price is more than $0.50 above the matching TCG listing (assumes similar shipping). Clears dead-weight listings buyers won't pick over the cheaper TCG copy.
 - **`scryland compare`** — side-by-side price table across both marketplaces.
 - **`scryland doctor`** — one-shot health check.
 
@@ -69,6 +70,14 @@ uv run scryland optimize
 
 # Add cards from a Mythic Tools CSV export
 uv run scryland add-inventory cards.csv --skip-lands --min-price 0.25
+
+# Re-list cards you sold previously (DB has them as 'sold' but you own them again)
+uv run scryland add-inventory cards.csv --include-sold
+
+# After the run, scryland writes <input>_priced.csv with the real TCG-found
+# prices substituted in. Re-run with that file to skip floor cards via the
+# existing --csv-min-price pre-filter — no second TCG search needed.
+uv run scryland add-inventory cards_priced.csv --csv-min-price 0.10
 ```
 
 ## Quick start — eBay
@@ -105,7 +114,8 @@ uv run scryland watch -i 30
 uv run scryland watch --ebay-only -i 10 \
     --ebay-min-price 0.99 \
     --ebay-max-price 50 \
-    --ebay-delist-below 0.50
+    --ebay-delist-below 0.50 \
+    --ebay-delist-uncompetitive-gap 0.50
 
 # Side-by-side comparison of current prices
 uv run scryland compare

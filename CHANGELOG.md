@@ -1,5 +1,29 @@
 # Changelog
 
+## [Unreleased]
+
+### `add-inventory` improvements
+- `--include-sold` flag re-lists cards that the DB shows as previously sold (use when the CSV is your full current inventory and you've re-acquired things).
+- Auto-writes `<input>_priced.csv` at the end of every run with the real TCG-found prices substituted into the Price columns. Subsequent runs against that file skip floor cards via the existing `--csv-min-price` pre-filter without a second TCG search.
+- Collector-#-first matching: when set + collector # both match a search row, accept it without requiring a name fuzzy-match (rescues cards TCG decorates as `(Borderless)` / `(Showcase)` or that have DFC name reorderings).
+- Fallback search retry without the set filter when the first search returns 0 results — Mythic Tools set names sometimes don't line up with TCG's dropdown labels (promos, special editions).
+- New "Not Added (N)" focused table at the end of each run, listing every card we couldn't add (excluding intentional too-cheap drops).
+- Manual deferred-review prompts now show the card quantity inline.
+
+### `list-on-ebay` improvements
+- End-of-run "List on eBay Summary" + "Not Listed" focused tables, mirroring `add-inventory`'s shape.
+- Retry on `errorId 25001` ("Internal Server Error" / "Core Inventory Service") for the inventory PUT — these are transient and were previously failing the card outright.
+- Retry on `errorId 25604` ("Availability not found") for the publish step — eventual-consistency in eBay's inventory service that previously failed cards on first try.
+- Aspect-rename diagnostic: when eBay flags a "Some item specifics were renamed" warning, we now GET the inventory item back and log a `dropped: [...] / appeared: [...]` diff so the actual rename is visible instead of hidden.
+
+### `scryland watch`
+- New `--ebay-delist-uncompetitive-gap FLOAT` mode: withdraw active eBay listings whose price exceeds the matching TCG inventory price by more than `$gap`. Targets the "no buyer would ever pick eBay $0.99 over TCG $0.10" case.
+
+### Fixes
+- Wrap post-save `goto(inventory_url)` in `add-inventory` with `retry_on_flaky` to handle the `net::ERR_ABORTED` race against the save's redirect.
+- Wrap `is_already_listed` and `get_tcg_lowest_price` evaluations with `retry_on_flaky` so the click-Add → manage-page navigation race no longer raises "Execution context was destroyed."
+- `add-inventory` priced-CSV path now correctly handles input filenames without a `.csv` extension (e.g. `Mythic Tools List Export (all.ards)`).
+
 ## [0.1.0] — 2026-04-19
 
 Initial public release.

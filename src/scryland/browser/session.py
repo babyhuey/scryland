@@ -26,6 +26,12 @@ class BrowserSession:
         self._playwright = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
+        # Flipped True by Playwright's close/crash event handlers (registered
+        # in start()). is_alive() reads this so we don't need an async probe
+        # to detect a torn-down chromium — Page.url is a cached read that
+        # never throws, and Page.is_closed() stays False until Playwright
+        # observes the disconnect.
+        self._dead = False
 
     @property
     def page(self) -> Page:
@@ -33,9 +39,21 @@ class BrowserSession:
             raise RuntimeError("Browser session not started. Call start() first.")
         return self._page
 
+    def is_alive(self) -> bool:
+        """True if the page/context are still usable. Cheap — no I/O."""
+        if self._page is None or self._context is None or self._dead:
+            return False
+        try:
+            return not self._page.is_closed()
+        except Exception:
+            return False
+
     async def start(self) -> None:
         """Launch browser with persistent context."""
         logger.info("Starting browser session...")
+        # Reset in case start() is called after a previous close/crash —
+        # otherwise the new session would inherit the dead flag.
+        self._dead = False
 
         # Ensure user data directory exists
         self._config.user_data_path.mkdir(parents=True, exist_ok=True)
@@ -74,6 +92,15 @@ class BrowserSession:
 
             self._page.wait_for_timeout = _noop  # type: ignore[assignment]
             logger.info("no_delays enabled — waits and human_delay() are no-ops")
+
+        # Flip _dead when chromium goes away. Page.url is a cached read so
+        # synchronous probing can't catch a crash; these events do.
+        def _mark_dead(*_args: object) -> None:
+            self._dead = True
+
+        self._context.on("close", _mark_dead)
+        self._page.on("close", _mark_dead)
+        self._page.on("crash", _mark_dead)
 
         logger.info("Browser session started")
 
