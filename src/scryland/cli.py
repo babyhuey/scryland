@@ -815,16 +815,23 @@ async def _ebay_watch_pass(
                 target = round(max(undercut_target, min_price, 0.99), 2)
                 if abs(target - current) < 0.01:
                     continue
-                # Guardrail: skip big drops unless volatile
-                if (
-                    current > 0
-                    and (target - current) / current < -config.max_price_change_pct / 100
+                # Guardrail: skip big drops unless volatile. Combines pct
+                # AND absolute thresholds so penny moves (e.g. $0.04 → $0.03)
+                # aren't held up by their large percentage.
+                from scryland.pricing.guardrails import is_big_price_drop as _is_big_drop
+
+                if _is_big_drop(
+                    float(current),
+                    float(target),
+                    config.max_price_change_pct,
+                    config.max_price_change_abs,
                 ):
                     skipped_big_drops += 1
                     console.print(
                         f"    [yellow]{lst['product_name'][:40]} "
                         f"skip big drop ${current:.2f} → ${target:.2f} "
-                        f"(>{config.max_price_change_pct:.0f}%)[/yellow]"
+                        f"(>{config.max_price_change_pct:.0f}% AND "
+                        f">${config.max_price_change_abs:.2f})[/yellow]"
                     )
                     continue
                 planned_updates.append(
@@ -2469,6 +2476,14 @@ def sales_report(ctx: click.Context) -> None:
     "dollars above the matching TCG listing's price (assumes similar "
     "shipping). Use 0.50 to delist when ~$0.50+ over TCG. Off by default.",
 )
+@click.option(
+    "--prompt-timeout",
+    type=float,
+    default=30.0,
+    help="When --volatile is OFF, auto-default the 'apply big drop?' prompt "
+    "after this many seconds so unattended watch runs progress instead of "
+    "stalling. Default 30s; pass 0 to wait forever.",
+)
 @click.pass_context
 def watch(
     ctx: click.Context,
@@ -2481,6 +2496,7 @@ def watch(
     ebay_max_price: float | None,
     ebay_delist_below: float | None,
     ebay_delist_uncompetitive_gap: float | None,
+    prompt_timeout: float,
 ) -> None:
     """Recurring multi-marketplace price optimizer + sales watcher.
 
@@ -2507,6 +2523,10 @@ def watch(
     if volatile:
         config = config.model_copy(update={"max_price_change_pct": 999.0})
         console.print("[yellow]Volatile mode — all price changes will be auto-approved.[/yellow]")
+    # Propagate the prompt timeout so the optimizer's confirm helper picks
+    # it up — without volatile, big drops still need a y/N, but unattended
+    # runs auto-skip after the timeout instead of stalling.
+    config = config.model_copy(update={"prompt_timeout_s": prompt_timeout})
     logger = ctx.obj["logger"]
 
     async def _run() -> None:
