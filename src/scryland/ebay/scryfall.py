@@ -56,7 +56,10 @@ _NEGATIVE_CACHE = object()
 
 def _cache_key(name: str, set_name: str | None, collector: str | None) -> str:
     raw = f"{name.lower()}|{(set_name or '').lower()}|{(collector or '').lstrip('0')}"
-    return hashlib.sha1(raw.encode()).hexdigest()
+    # SHA-1 is used purely as a content-addressable cache key (hex digest
+    # → filename), not for any security purpose. usedforsecurity=False
+    # tells hashlib + bandit to skip the weak-hash warning.
+    return hashlib.sha1(raw.encode(), usedforsecurity=False).hexdigest()
 
 
 def _cache_load(key: str):

@@ -15,6 +15,9 @@ logger = logging.getLogger("scryland")
 console = Console()
 
 
+_STDIN_CLOSED_NOTICED = False
+
+
 def confirm_with_timeout(prompt: str, *, default: bool, timeout_s: float) -> bool:
     """Prompt y/N with an auto-default after `timeout_s` seconds.
 
@@ -24,12 +27,19 @@ def confirm_with_timeout(prompt: str, *, default: bool, timeout_s: float) -> boo
     past the "big drop" prompt instead of stalling indefinitely.
 
     Linux/Unix only — uses select() on stdin. Windows would need a thread.
+    On a closed/EOF stdin (nohup, systemd unit without TTY) select returns
+    immediately; we detect that case, print a one-time notice, and return
+    `default` for every prompt without pretending to wait.
     """
     if timeout_s <= 0:
         return Confirm.ask(prompt, default=default)
 
     import select
     import sys
+
+    global _STDIN_CLOSED_NOTICED
+    if _STDIN_CLOSED_NOTICED:
+        return default
 
     suffix = "Y/n" if default else "y/N"
     print(
@@ -41,7 +51,14 @@ def confirm_with_timeout(prompt: str, *, default: bool, timeout_s: float) -> boo
     if not ready:
         print(f" → auto-{'yes' if default else 'no'} (timeout)")
         return default
-    response = sys.stdin.readline().strip().lower()
+    response = sys.stdin.readline()
+    if response == "":
+        # EOF — stdin is closed (nohup, systemd, redirected /dev/null).
+        # Latch the notice so we don't spam it every prompt.
+        _STDIN_CLOSED_NOTICED = True
+        print(f" → stdin closed; auto-defaulting all prompts to {'yes' if default else 'no'}")
+        return default
+    response = response.strip().lower()
     if response in ("y", "yes"):
         return True
     if response in ("n", "no"):
@@ -61,14 +78,18 @@ def is_big_price_drop(
     (percentage) and absolute (dollar) check with AND semantics, so penny
     moves on cheap cards aren't blocked by their large percentage. Set
     max_abs to 0 for pct-only behavior (legacy mode).
+
+    Threshold semantics are inclusive (`>=`): when the user sets
+    `--max-price-change-pct 10`, a drop *exactly equal to* 10% should
+    block, not slip through. The legacy strict `>` was happenstance.
     """
     if new_price >= old_price or old_price <= 0:
         return False
     pct_drop = (old_price - new_price) / old_price * 100
     abs_drop = old_price - new_price
     if max_abs <= 0:
-        return pct_drop > max_pct
-    return pct_drop > max_pct and abs_drop > max_abs
+        return pct_drop >= max_pct
+    return pct_drop >= max_pct and abs_drop >= max_abs
 
 
 class PriceGuardrails:
@@ -108,22 +129,19 @@ class PriceGuardrails:
             update.reject()
             return update
 
-        # Flag suspicious downward moves only — combines % and $ thresholds
-        # so a $0.01 penny drop doesn't get held up by its large percentage.
-        if is_big_price_drop(
-            float(update.old_price),
-            float(update.new_price),
-            self._max_change_pct,
-            self._max_change_abs,
-        ):
+        # General-purpose batch path: flag any large change in either
+        # direction (data-error guard for csv_import and pricing engine).
+        # The CLI optimizer + eBay sweep use `is_big_price_drop` instead,
+        # which is drops-only and adds the absolute-dollar floor — that
+        # logic is too narrow here, where a big spike could be a data bug.
+        abs_change = abs(update.change_pct)
+        if abs_change > self._max_change_pct:
             update.requires_confirmation = True
             logger.info(
-                "Large price drop for '%s': %.1f%% / $%.2f (thresholds: %.1f%% AND $%.2f)",
+                "Large price change for '%s': %.1f%% (threshold: %.1f%%)",
                 update.listing.product_name,
                 update.change_pct,
-                float(update.old_price - update.new_price),
                 self._max_change_pct,
-                self._max_change_abs,
             )
 
         return update

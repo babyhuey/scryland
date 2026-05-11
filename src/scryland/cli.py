@@ -1846,6 +1846,9 @@ async def _refresh_ebay_listings(config, db, logger) -> dict:
         return {"updated": 0, "missing_local": 0, "total_remote": 0}
 
     console.print(f"Fetching offers for {len(skus)} local SKU(s)…")
+    # Client only needed for the offer fetch; DB writes below don't need
+    # it. If a future change adds per-row API calls inside the loop,
+    # the client will already be closed — move that work inside this block.
     async with EbayClient(config, auth, passphrase) as client:
         offers = await client.iter_offers_for_skus(skus)
 
