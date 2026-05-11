@@ -309,7 +309,7 @@ async def _tcg_floor_sweep(session, config, db, logger, threshold: float) -> int
                 logger.debug(
                     "floor: networkidle timeout after click_manage — proceeding"
                 )
-            zeroed = 0
+            zeroed_rows: list[dict] = []
             for row in rows:
                 try:
                     await retry_on_flaky(
@@ -317,7 +317,7 @@ async def _tcg_floor_sweep(session, config, db, logger, threshold: float) -> int
                         page=session.page,
                         label="floor: set_quantity_zero",
                     )
-                    zeroed += 1
+                    zeroed_rows.append(row)
                 except Exception:
                     logger.warning(
                         "Floor sweep: failed to zero qty for %s (%s)",
@@ -325,22 +325,26 @@ async def _tcg_floor_sweep(session, config, db, logger, threshold: float) -> int
                         row["condition"],
                         exc_info=True,
                     )
-            if zeroed:
+            if zeroed_rows:
                 try:
                     await retry_on_flaky(
                         lambda: pricing_page.save_changes(),
                         page=session.page,
                         label="floor: save_changes",
                     )
-                    for row in rows:
+                    # Only mark the rows we actually zeroed as removed —
+                    # marking the whole `rows` group would falsely flag
+                    # un-zeroed rows as removed in the DB while they're
+                    # still live on TCG.
+                    for row in zeroed_rows:
                         db.mark_inventory_removed(
                             row["product_name"],
                             row["condition"],
                             row["finish"] or "",
                         )
-                    delisted += zeroed
+                    delisted += len(zeroed_rows)
                     console.print(
-                        f"    [red]Delisted {zeroed}× '{product_name}' "
+                        f"    [red]Delisted {len(zeroed_rows)}× '{product_name}' "
                         f"at or below ${threshold:.2f}[/red]"
                     )
                 except Exception:
@@ -348,29 +352,40 @@ async def _tcg_floor_sweep(session, config, db, logger, threshold: float) -> int
                         "Floor sweep save failed for '%s' — %d delist(s) "
                         "NOT persisted",
                         product_name,
-                        zeroed,
+                        len(zeroed_rows),
                         exc_info=True,
                     )
                     console.print(
                         f"    [red]Save failed — '{product_name}' delist(s) not applied[/red]"
                     )
-            await session.human_delay()
-            # reapply_filter=True is critical here: TCG drops the
-            # 'My Inventory Only' state across the save→Back-to-Inventory
-            # redirect, so without re-applying, the next iteration's
-            # click_manage_for_product paginates the global catalog and
-            # fails to find any of the user's listings.
-            await retry_on_flaky(
-                lambda: inventory_page.go_back_to_inventory(reapply_filter=True),
-                page=session.page,
-                label="floor: go_back_to_inventory",
-            )
         except Exception:
             logger.warning(
                 "Floor sweep failed for '%s' — skipped this run",
                 product_name,
                 exc_info=True,
             )
+        finally:
+            # Always re-navigate to inventory before the next iteration.
+            # Skipping this on a failure left the next click_manage_for_product
+            # firing against a stale manage page, cascading the failure.
+            # reapply_filter=True is critical: TCG drops 'My Inventory Only'
+            # across the save→Back-to-Inventory redirect, so without
+            # re-applying, the next iteration paginates the global catalog
+            # instead of the user's listings.
+            try:
+                await session.human_delay()
+                await retry_on_flaky(
+                    lambda: inventory_page.go_back_to_inventory(reapply_filter=True),
+                    page=session.page,
+                    label="floor: go_back_to_inventory",
+                )
+            except Exception:
+                logger.warning(
+                    "Floor sweep: could not return to inventory after '%s' — "
+                    "remaining products this run may be skipped",
+                    product_name,
+                    exc_info=True,
+                )
     return delisted
 
 
@@ -2298,14 +2313,15 @@ def watch(
 
                 # Recreate a dead browser session (e.g. crash, network reset,
                 # TargetClosedError from a prior run) before doing any TCG work.
-                if session is not None and not session.is_alive():
-                    console.print(
-                        "[yellow]Browser session lost — restarting...[/yellow]"
-                    )
-                    try:
-                        await session.close()
-                    except Exception:
-                        pass
+                if not ebay_only and (session is None or not session.is_alive()):
+                    if session is not None:
+                        console.print(
+                            "[yellow]Browser session lost — restarting...[/yellow]"
+                        )
+                        try:
+                            await session.close()
+                        except Exception:
+                            pass
                     session = BrowserSession(config)
                     try:
                         await session.start()
@@ -2315,6 +2331,16 @@ def watch(
                         console.print(
                             "[red]Could not restart browser — skipping TCG this run[/red]"
                         )
+                        # The half-initialized session would crash every
+                        # downstream call (run_price_differential_optimize,
+                        # OrdersPage(session.page, ...)). Drop the reference
+                        # so this iteration runs eBay-only and the next
+                        # iteration retries the restart from scratch.
+                        try:
+                            await session.close()
+                        except Exception:
+                            pass
+                        session = None
 
                 opt_result = OptimizeResult()
                 total_change = 0.0
@@ -2322,8 +2348,9 @@ def watch(
                 # UnboundLocalError if the try-block raises early.
                 ebay_result: dict = _empty_ebay_result()
                 try:
-                    if ebay_only:
-                        # eBay-only: skip the TCG optimize + TCG sales scrape.
+                    if ebay_only or session is None:
+                        # eBay-only (or browser restart failed): skip the
+                        # TCG optimize + TCG sales scrape.
                         pass
                     else:
                         opt_result = await run_price_differential_optimize(session, config, console)
@@ -2339,7 +2366,12 @@ def watch(
                     # TCG floor sweep — covers the gap where a card has
                     # drifted to the bottom of market and stops appearing
                     # in the differential report (no diff = no row).
-                    if not ebay_only and delist_below and delist_below > 0:
+                    if (
+                        not ebay_only
+                        and session is not None
+                        and delist_below
+                        and delist_below > 0
+                    ):
                         try:
                             floor_delisted = await _tcg_floor_sweep(
                                 session, config, db, logger, delist_below
@@ -2352,7 +2384,7 @@ def watch(
                             )
 
                     # Quick TCG sales check — only runs when we have a browser.
-                    if not ebay_only:
+                    if not ebay_only and session is not None:
                         try:
                             orders_page = OrdersPage(session.page, config)
                             await orders_page.navigate()

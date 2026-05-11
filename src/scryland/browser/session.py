@@ -33,6 +33,24 @@ class BrowserSession:
             raise RuntimeError("Browser session not started. Call start() first.")
         return self._page
 
+    def is_alive(self) -> bool:
+        """True if the page/context are still usable. Cheap — no I/O."""
+        if self._page is None or self._context is None:
+            return False
+        try:
+            if self._page.is_closed():
+                return False
+            # The page can outlive a closed/crashed browser process.
+            # `browser` is None for persistent contexts that lost their
+            # underlying chromium; otherwise check is_connected() so a
+            # crashed-but-not-yet-cleaned-up browser doesn't pass as alive.
+            browser = self._context.browser
+            if browser is not None and not browser.is_connected():
+                return False
+            return True
+        except Exception:
+            return False
+
     async def start(self) -> None:
         """Launch browser with persistent context."""
         logger.info("Starting browser session...")
