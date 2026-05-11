@@ -108,6 +108,60 @@ def read_mythic_csv(path: Path, english_only: bool = True) -> list[MythicCard]:
     return cards
 
 
+def write_priced_csv(
+    input_path: Path,
+    output_path: Path,
+    price_overrides: dict[tuple[str, str, str], Decimal],
+) -> int:
+    """Rewrite a Mythic Tools CSV with TCG-found prices.
+
+    Reads the original CSV, replaces the price column for each row whose
+    (card_name, condition, finish) appears in `price_overrides`, and writes
+    the result to `output_path`. The finish drives which price column is
+    overwritten — "Price (USD Foil)" / "Price (USD Etched)" / "Price (USD)".
+
+    Returns the number of rows updated.
+
+    Note: the override key is (card_name, condition, finish) only — it
+    intentionally does NOT include set/printing because that matches what
+    `merge_duplicates` collapses on. If the source CSV contains the same
+    name+condition+finish across multiple sets (alt-art reprints, different
+    printings), every matching row gets the same TCG-found price written.
+    """
+    with open(input_path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+
+    updated = 0
+    for row in rows:
+        key = (
+            row.get("Card Name", "").strip(),
+            row.get("Condition", "NM").strip(),
+            row.get("Finish", "nonfoil").strip(),
+        )
+        if key not in price_overrides:
+            continue
+        new_price = price_overrides[key]
+        finish = key[2]
+        if finish == "foil" and "Price (USD Foil)" in fieldnames:
+            row["Price (USD Foil)"] = f"{new_price}"
+        elif finish == "etched" and "Price (USD Etched)" in fieldnames:
+            row["Price (USD Etched)"] = f"{new_price}"
+        elif "Price (USD)" in fieldnames:
+            row["Price (USD)"] = f"{new_price}"
+        else:
+            continue
+        updated += 1
+
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return updated
+
+
 def merge_duplicates(cards: list[MythicCard]) -> list[MythicCard]:
     """Merge duplicate cards (same name + condition + finish), summing quantities.
 
