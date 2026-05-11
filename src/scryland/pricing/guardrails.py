@@ -15,6 +15,9 @@ logger = logging.getLogger("scryland")
 console = Console()
 
 
+_STDIN_CLOSED_NOTICED = False
+
+
 def confirm_with_timeout(prompt: str, *, default: bool, timeout_s: float) -> bool:
     """Prompt y/N with an auto-default after `timeout_s` seconds.
 
@@ -24,12 +27,19 @@ def confirm_with_timeout(prompt: str, *, default: bool, timeout_s: float) -> boo
     past the "big drop" prompt instead of stalling indefinitely.
 
     Linux/Unix only — uses select() on stdin. Windows would need a thread.
+    On a closed/EOF stdin (nohup, systemd unit without TTY) select returns
+    immediately; we detect that case, print a one-time notice, and return
+    `default` for every prompt without pretending to wait.
     """
     if timeout_s <= 0:
         return Confirm.ask(prompt, default=default)
 
     import select
     import sys
+
+    global _STDIN_CLOSED_NOTICED
+    if _STDIN_CLOSED_NOTICED:
+        return default
 
     suffix = "Y/n" if default else "y/N"
     print(
@@ -41,7 +51,14 @@ def confirm_with_timeout(prompt: str, *, default: bool, timeout_s: float) -> boo
     if not ready:
         print(f" → auto-{'yes' if default else 'no'} (timeout)")
         return default
-    response = sys.stdin.readline().strip().lower()
+    response = sys.stdin.readline()
+    if response == "":
+        # EOF — stdin is closed (nohup, systemd, redirected /dev/null).
+        # Latch the notice so we don't spam it every prompt.
+        _STDIN_CLOSED_NOTICED = True
+        print(f" → stdin closed; auto-defaulting all prompts to {'yes' if default else 'no'}")
+        return default
+    response = response.strip().lower()
     if response in ("y", "yes"):
         return True
     if response in ("n", "no"):
