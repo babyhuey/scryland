@@ -15,12 +15,69 @@ logger = logging.getLogger("scryland")
 console = Console()
 
 
+def confirm_with_timeout(prompt: str, *, default: bool, timeout_s: float) -> bool:
+    """Prompt y/N with an auto-default after `timeout_s` seconds.
+
+    Falls back to a synchronous wait when timeout_s <= 0 (legacy behavior),
+    so existing one-shot commands keep blocking forever for the user.
+    Used by watch with a non-zero timeout so unattended runs progress
+    past the "big drop" prompt instead of stalling indefinitely.
+
+    Linux/Unix only — uses select() on stdin. Windows would need a thread.
+    """
+    if timeout_s <= 0:
+        return Confirm.ask(prompt, default=default)
+
+    import select
+    import sys
+
+    suffix = "Y/n" if default else "y/N"
+    print(
+        f"{prompt} [{suffix}] (auto-{'yes' if default else 'no'} in {timeout_s:.0f}s): ",
+        end="",
+        flush=True,
+    )
+    ready, _, _ = select.select([sys.stdin], [], [], timeout_s)
+    if not ready:
+        print(f" → auto-{'yes' if default else 'no'} (timeout)")
+        return default
+    response = sys.stdin.readline().strip().lower()
+    if response in ("y", "yes"):
+        return True
+    if response in ("n", "no"):
+        return False
+    return default
+
+
+def is_big_price_drop(
+    old_price: float,
+    new_price: float,
+    max_pct: float,
+    max_abs: float,
+) -> bool:
+    """True if a downward price change should be flagged as suspicious.
+
+    Only DROPS count — upward moves are never flagged. Combines a relative
+    (percentage) and absolute (dollar) check with AND semantics, so penny
+    moves on cheap cards aren't blocked by their large percentage. Set
+    max_abs to 0 for pct-only behavior (legacy mode).
+    """
+    if new_price >= old_price or old_price <= 0:
+        return False
+    pct_drop = (old_price - new_price) / old_price * 100
+    abs_drop = old_price - new_price
+    if max_abs <= 0:
+        return pct_drop > max_pct
+    return pct_drop > max_pct and abs_drop > max_abs
+
+
 class PriceGuardrails:
     """Safety layer that flags and validates price changes before applying."""
 
     def __init__(self, config: ScrylandConfig) -> None:
         self._config = config
         self._max_change_pct = config.max_price_change_pct
+        self._max_change_abs = config.max_price_change_abs
         self._min_floor = Decimal(str(config.min_price_floor))
 
     def check(self, update: PriceUpdate) -> PriceUpdate:
@@ -51,15 +108,22 @@ class PriceGuardrails:
             update.reject()
             return update
 
-        # Flag large changes for confirmation
-        abs_change = abs(update.change_pct)
-        if abs_change > self._max_change_pct:
+        # Flag suspicious downward moves only — combines % and $ thresholds
+        # so a $0.01 penny drop doesn't get held up by its large percentage.
+        if is_big_price_drop(
+            float(update.old_price),
+            float(update.new_price),
+            self._max_change_pct,
+            self._max_change_abs,
+        ):
             update.requires_confirmation = True
             logger.info(
-                "Large price change for '%s': %.1f%% (threshold: %.1f%%)",
+                "Large price drop for '%s': %.1f%% / $%.2f (thresholds: %.1f%% AND $%.2f)",
                 update.listing.product_name,
                 update.change_pct,
+                float(update.old_price - update.new_price),
                 self._max_change_pct,
+                self._max_change_abs,
             )
 
         return update

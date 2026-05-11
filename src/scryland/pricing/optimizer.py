@@ -11,7 +11,6 @@ import logging
 from dataclasses import dataclass
 
 from rich.console import Console
-from rich.prompt import Confirm
 
 from scryland.browser.pages.price_report import PriceReportPage
 from scryland.browser.pages.pricing import PricingPage
@@ -79,9 +78,27 @@ async def run_price_differential_optimize(
                 current,
             )
             change_pct = 0.0
-        if change_pct < -config.max_price_change_pct and lowest > 0.01:
+        from scryland.pricing.guardrails import (
+            confirm_with_timeout,
+            is_big_price_drop,
+        )
+
+        if (
+            is_big_price_drop(
+                float(current),
+                float(lowest),
+                config.max_price_change_pct,
+                config.max_price_change_abs,
+            )
+            and lowest > 0.01
+        ):
             if not config.dry_run:
-                if not Confirm.ask(f"    Change of {change_pct:+.1f}% — apply?", default=False):
+                abs_drop = float(current) - float(lowest)
+                if not confirm_with_timeout(
+                    f"    Change of {change_pct:+.1f}% (-${abs_drop:.2f}) — apply?",
+                    default=False,
+                    timeout_s=config.prompt_timeout_s,
+                ):
                     console.print("    [yellow]Skipped[/yellow]")
                     result.skipped += 1
                     continue

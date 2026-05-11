@@ -26,9 +26,18 @@ class ScrylandConfig(BaseSettings):
     slow_mo_ms: int = 100
     user_data_dir: str = ".scryland_session"
 
-    # Pricing guardrails
+    # Pricing guardrails. A drop is treated as "big" only when BOTH the
+    # percentage AND the absolute dollar amount exceed their thresholds —
+    # that way a $0.04 → $0.03 move (25%, $0.01) goes through, but a
+    # $5 → $0.50 crash (90%, $4.50) is blocked. Set max_price_change_abs
+    # to 0 to fall back to pct-only behavior.
     max_price_change_pct: float = 10.0
+    max_price_change_abs: float = 0.50
     min_price_floor: float = 0.25
+    # Auto-default for "Apply this price change?" prompts after N seconds.
+    # 0 = wait forever (default for one-shot commands). watch sets this
+    # to a non-zero value so unattended runs progress instead of stalling.
+    prompt_timeout_s: float = 0.0
 
     # Operation
     dry_run: bool = False
