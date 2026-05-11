@@ -1756,6 +1756,149 @@ def status(ctx: click.Context, refresh: bool) -> None:
         db.close()
 
 
+async def _scrape_tcg_inventory(session, config, db, logger) -> None:
+    """Browser-scrape every TCG product into the local inventory table.
+
+    Shared core of `sync` and `sync-inventory`. Caller owns session + db
+    lifecycle. Prints progress to the global console.
+    """
+    from scryland.browser.pages.inventory import InventoryPage
+    from scryland.models import Listing
+
+    inventory_page = InventoryPage(session.page, config)
+    await inventory_page.navigate()
+
+    products = await inventory_page.get_product_names()
+    console.print(f"Found [cyan]{len(products)}[/cyan] products on TCGPlayer.")
+
+    all_listings: list[Listing] = []
+    for idx, product in enumerate(products):
+        product_name = product["name"]
+        console.print(
+            f"  Scraping ({idx + 1}/{len(products)}): {product_name}",
+            end="",
+        )
+
+        await session.human_delay()
+        await session.dismiss_popups()
+
+        try:
+            await inventory_page.click_manage_for_product(product_name)
+            await session.dismiss_popups()
+            listings = await inventory_page.get_manage_page_listings(product_name)
+            all_listings.extend(listings)
+            console.print(f" — [green]{len(listings)} listings[/green]")
+        except Exception:
+            console.print(" — [red]failed[/red]")
+            logger.debug("Failed to scrape '%s'", product_name, exc_info=True)
+
+        await session.human_delay()
+        await inventory_page.go_back_to_inventory(reapply_filter=False)
+
+    console.print(f"\nSyncing {len(all_listings)} listings to database...")
+    report = db.sync(all_listings)
+    summary = db.get_summary()
+    _print_sync_report(report, summary)
+
+
+async def _refresh_ebay_listings(config, db, logger) -> dict:
+    """Refresh ebay_listings rows from the live Sell API.
+
+    Walks every active offer via `/sell/inventory/v1/offer`, updates the
+    matching local row's price/quantity/status. New offers (not in our DB)
+    are skipped and reported — they should be re-created via list-on-ebay
+    so canonical_key gets reconstructed properly from inventory_item.
+
+    Returns counts: {updated, missing_local, total_remote}.
+    """
+    from scryland.ebay.auth import EbayAuth
+    from scryland.ebay.client import EbayClient
+
+    passphrase = _ebay_passphrase(config)
+    auth = EbayAuth(config)
+    try:
+        await auth.access_token(passphrase)
+    except Exception as exc:
+        console.print(f"[red]eBay auth failed: {exc}[/red]")
+        return {"updated": 0, "missing_local": 0, "total_remote": 0, "error": str(exc)}
+
+    async with EbayClient(config, auth, passphrase) as client:
+        offers = await client.iter_all_offers()
+
+    console.print(f"Fetched [cyan]{len(offers)}[/cyan] offer(s) from eBay.")
+
+    by_sku = {
+        row["sku"]: row
+        for row in db.conn.execute(
+            "SELECT sku, product_name, set_name, collector_number, condition, "
+            "is_foil FROM ebay_listings"
+        ).fetchall()
+    }
+
+    updated = 0
+    missing_local: list[str] = []
+    for offer in offers:
+        sku = offer.get("sku")
+        if not sku:
+            continue
+        local = by_sku.get(sku)
+        if local is None:
+            missing_local.append(sku)
+            continue
+        # Map offer status to our local enum. Published/active offers stay
+        # 'active'; withdrawn/ended become 'ended'.
+        status_remote = (offer.get("status") or "").upper()
+        if status_remote in {"PUBLISHED", "ACTIVE"}:
+            status_local = "active"
+        elif status_remote in {"UNPUBLISHED"}:
+            status_local = "draft"
+        else:
+            status_local = "ended"
+        price_str = (
+            offer.get("pricingSummary", {}).get("price", {}).get("value")
+            if offer.get("pricingSummary")
+            else None
+        )
+        try:
+            price = float(price_str) if price_str else 0.0
+        except (TypeError, ValueError):
+            price = 0.0
+        quantity = int(offer.get("availableQuantity") or 0)
+        listing_id = offer.get("listing", {}).get("listingId") if offer.get("listing") else None
+        db.upsert_ebay_listing(
+            sku=sku,
+            offer_id=offer.get("offerId"),
+            listing_id=listing_id,
+            product_name=local["product_name"],
+            set_name=local["set_name"],
+            collector_number=local["collector_number"],
+            condition=local["condition"],
+            is_foil=bool(local["is_foil"]),
+            price=price,
+            quantity=quantity,
+            status=status_local,
+        )
+        updated += 1
+    db.conn.commit()
+
+    if missing_local:
+        console.print(
+            f"  [yellow]{len(missing_local)} eBay offer(s) have no local row[/yellow] "
+            f"— they were created outside scryland. Re-run list-on-ebay against "
+            f"your CSV to backfill canonical_key for these."
+        )
+        for sku in missing_local[:5]:
+            console.print(f"    [dim]{sku}[/dim]")
+        if len(missing_local) > 5:
+            console.print(f"    [dim]... and {len(missing_local) - 5} more[/dim]")
+
+    return {
+        "updated": updated,
+        "missing_local": len(missing_local),
+        "total_remote": len(offers),
+    }
+
+
 @cli.command()
 @click.pass_context
 def sync(ctx: click.Context) -> None:
@@ -1770,10 +1913,8 @@ def sync(ctx: click.Context) -> None:
     logger = ctx.obj["logger"]
 
     async def _run() -> None:
-        from scryland.browser.pages.inventory import InventoryPage
         from scryland.browser.session import BrowserSession
         from scryland.db import InventoryDB
-        from scryland.models import Listing
 
         session = BrowserSession(config)
         db = InventoryDB(Path(config.db_path))
@@ -1782,42 +1923,7 @@ def sync(ctx: click.Context) -> None:
             db.open()
             await session.start()
             await session.ensure_logged_in()
-
-            inventory_page = InventoryPage(session.page, config)
-            await inventory_page.navigate()
-
-            products = await inventory_page.get_product_names()
-            console.print(f"Found [cyan]{len(products)}[/cyan] products on TCGPlayer.")
-
-            all_listings: list[Listing] = []
-            for idx, product in enumerate(products):
-                product_name = product["name"]
-                console.print(
-                    f"  Scraping ({idx + 1}/{len(products)}): {product_name}",
-                    end="",
-                )
-
-                await session.human_delay()
-                await session.dismiss_popups()
-
-                try:
-                    await inventory_page.click_manage_for_product(product_name)
-                    await session.dismiss_popups()
-                    listings = await inventory_page.get_manage_page_listings(product_name)
-                    all_listings.extend(listings)
-                    console.print(f" — [green]{len(listings)} listings[/green]")
-                except Exception:
-                    console.print(" — [red]failed[/red]")
-                    logger.debug("Failed to scrape '%s'", product_name, exc_info=True)
-
-                await session.human_delay()
-                await inventory_page.go_back_to_inventory(reapply_filter=False)
-
-            console.print(f"\nSyncing {len(all_listings)} listings to database...")
-            report = db.sync(all_listings)
-            summary = db.get_summary()
-            _print_sync_report(report, summary)
-
+            await _scrape_tcg_inventory(session, config, db, logger)
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
         except Exception:
@@ -1829,6 +1935,72 @@ def sync(ctx: click.Context) -> None:
                 await session.close()
             except Exception:
                 pass
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted.[/yellow]")
+
+
+@cli.command("sync-inventory")
+@click.option("--tcg-only", is_flag=True, help="Only refresh TCG inventory (skip eBay).")
+@click.option("--ebay-only", is_flag=True, help="Only refresh eBay listings (skip TCG).")
+@click.pass_context
+def sync_inventory(ctx: click.Context, tcg_only: bool, ebay_only: bool) -> None:
+    """Refresh both local inventory tables from live marketplace data.
+
+    - TCG: browser-walk every product, scrape its manage page (slow,
+      ~5–10s per product).
+    - eBay: paginate /sell/inventory/v1/offer and update local rows
+      (fast, seconds for hundreds).
+
+    Use this after listings have been added/edited outside scryland, or
+    when the uncompetitive-delist sweep is missing rows because a local
+    canonical_key has no matching TCG inventory entry.
+
+    --tcg-only / --ebay-only run just one side. By default both run.
+    """
+    if tcg_only and ebay_only:
+        console.print("[red]--tcg-only and --ebay-only are mutually exclusive.[/red]")
+        sys.exit(1)
+    config: ScrylandConfig = ctx.obj["config"]
+    logger = ctx.obj["logger"]
+
+    async def _run() -> None:
+        from scryland.browser.session import BrowserSession
+        from scryland.db import InventoryDB
+
+        db = InventoryDB(Path(config.db_path))
+        session: BrowserSession | None = None
+        try:
+            db.open()
+
+            if not ebay_only:
+                console.print("[bold]TCG sync[/bold] (browser scrape)…")
+                session = BrowserSession(config)
+                await session.start()
+                await session.ensure_logged_in()
+                await _scrape_tcg_inventory(session, config, db, logger)
+
+            if not tcg_only:
+                console.print("\n[bold]eBay sync[/bold] (Sell API)…")
+                result = await _refresh_ebay_listings(config, db, logger)
+                console.print(
+                    f"  Updated [green]{result['updated']}[/green] eBay row(s) "
+                    f"from {result['total_remote']} live offer(s)."
+                )
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Interrupted.[/yellow]")
+        except Exception:
+            logger.exception("sync-inventory failed")
+            sys.exit(1)
+        finally:
+            db.close()
+            if session is not None:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
 
     try:
         asyncio.run(_run())
