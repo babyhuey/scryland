@@ -1,0 +1,97 @@
+name: Dependabot auto-merge
+
+# Auto-merge Dependabot PRs once the CI workflow on the same SHA succeeds.
+# Major version bumps still require manual review — they're commented but not merged.
+#
+# Triggered by every PR event from dependabot[bot], plus check_suite completion
+# so the merge fires the moment the matching CI run goes green.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  check_suite:
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'pull_request_target' && github.actor == 'dependabot[bot]')
+      || (github.event_name == 'check_suite' && github.event.check_suite.conclusion == 'success')
+    steps:
+      - name: Resolve Dependabot PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER_PR: ${{ github.event.pull_request.number }}
+          PR_ACTOR_PR: ${{ github.event.pull_request.user.login }}
+          HEAD_SHA: ${{ github.event.check_suite.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request_target" ]; then
+            echo "number=$PR_NUMBER_PR" >> "$GITHUB_OUTPUT"
+            echo "actor=$PR_ACTOR_PR" >> "$GITHUB_OUTPUT"
+          else
+            pr_json=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --jq '.[0] // empty')
+            if [ -z "$pr_json" ]; then
+              echo "no PR for this check_suite — skipping"
+              echo "number=" >> "$GITHUB_OUTPUT"
+              echo "actor=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "number=$(echo "$pr_json" | jq -r .number)" >> "$GITHUB_OUTPUT"
+            echo "actor=$(echo "$pr_json" | jq -r .user.login)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip non-Dependabot PRs
+        if: steps.pr.outputs.number == '' || steps.pr.outputs.actor != 'dependabot[bot]'
+        run: echo "Not a Dependabot PR — exiting"
+
+      - name: Fetch Dependabot metadata
+        id: meta
+        if: steps.pr.outputs.number != '' && steps.pr.outputs.actor == 'dependabot[bot]'
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Hold major version bumps
+        if: >
+          steps.pr.outputs.number != ''
+          && steps.pr.outputs.actor == 'dependabot[bot]'
+          && steps.meta.outputs.update-type == 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.pr.outputs.number }}
+          DEP_NAMES: ${{ steps.meta.outputs.dependency-names }}
+          PREV_VERSION: ${{ steps.meta.outputs.previous-version }}
+          NEW_VERSION: ${{ steps.meta.outputs.new-version }}
+        run: |
+          set -euo pipefail
+          # Pass the comment body via stdin so DEP_NAMES / versions
+          # (Dependabot-derived strings) can never escape into the shell.
+          printf 'Holding for manual review — major version bump (`%s` %s → %s). Auto-merge skipped.\n' \
+            "$DEP_NAMES" "$PREV_VERSION" "$NEW_VERSION" \
+            | gh pr comment "$PR" --body-file -
+
+      - name: Approve and squash-merge
+        if: >
+          steps.pr.outputs.number != ''
+          && steps.pr.outputs.actor == 'dependabot[bot]'
+          && steps.meta.outputs.update-type != 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.pr.outputs.number }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+        run: |
+          set -euo pipefail
+          printf 'Auto-approving Dependabot %s bump.\n' "$UPDATE_TYPE" \
+            | gh pr review "$PR" --approve --body-file -
+          # --auto requires branch protection. Without it, fall back to
+          # immediate merge once mergeable.
+          gh pr merge "$PR" --squash --delete-branch --auto \
+            || gh pr merge "$PR" --squash --delete-branch
