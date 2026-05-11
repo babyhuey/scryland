@@ -275,8 +275,7 @@ async def _tcg_floor_sweep(session, config, db, logger, threshold: float) -> int
         return 0
 
     console.print(
-        f"  [dim]TCG floor sweep: {len(candidates)} listing(s) at or "
-        f"below ${threshold:.2f}…[/dim]"
+        f"  [dim]TCG floor sweep: {len(candidates)} listing(s) at or below ${threshold:.2f}…[/dim]"
     )
     inventory_page = InventoryPage(session.page, config)
     pricing_page = PricingPage(session.page, config)
@@ -306,9 +305,7 @@ async def _tcg_floor_sweep(session, config, db, logger, threshold: float) -> int
             try:
                 await session.page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
-                logger.debug(
-                    "floor: networkidle timeout after click_manage — proceeding"
-                )
+                logger.debug("floor: networkidle timeout after click_manage — proceeding")
             zeroed_rows: list[dict] = []
             for row in rows:
                 try:
@@ -349,8 +346,7 @@ async def _tcg_floor_sweep(session, config, db, logger, threshold: float) -> int
                     )
                 except Exception:
                     logger.warning(
-                        "Floor sweep save failed for '%s' — %d delist(s) "
-                        "NOT persisted",
+                        "Floor sweep save failed for '%s' — %d delist(s) NOT persisted",
                         product_name,
                         len(zeroed_rows),
                         exc_info=True,
@@ -743,9 +739,7 @@ async def _ebay_watch_pass(
                 # condition collapses to: our_ebay_price - tcg_price > gap.
                 if delist_uncompetitive_gap is not None:
                     canonical = lst.get("canonical_key")
-                    tcg_row = (
-                        db.find_inventory_by_canonical(canonical) if canonical else None
-                    )
+                    tcg_row = db.find_inventory_by_canonical(canonical) if canonical else None
                     tcg_price = tcg_row["current_price"] if tcg_row else None
                     if tcg_price is not None and current > 0:
                         gap = float(current) - float(tcg_price)
@@ -2315,9 +2309,7 @@ def watch(
                 # TargetClosedError from a prior run) before doing any TCG work.
                 if not ebay_only and (session is None or not session.is_alive()):
                     if session is not None:
-                        console.print(
-                            "[yellow]Browser session lost — restarting...[/yellow]"
-                        )
+                        console.print("[yellow]Browser session lost — restarting...[/yellow]")
                         try:
                             await session.close()
                         except Exception:
@@ -2366,12 +2358,7 @@ def watch(
                     # TCG floor sweep — covers the gap where a card has
                     # drifted to the bottom of market and stops appearing
                     # in the differential report (no diff = no row).
-                    if (
-                        not ebay_only
-                        and session is not None
-                        and delist_below
-                        and delist_below > 0
-                    ):
+                    if not ebay_only and session is not None and delist_below and delist_below > 0:
                         try:
                             floor_delisted = await _tcg_floor_sweep(
                                 session, config, db, logger, delist_below
@@ -2379,9 +2366,7 @@ def watch(
                             opt_result.delisted += floor_delisted
                         except Exception:
                             logger.warning("TCG floor sweep failed", exc_info=True)
-                            console.print(
-                                "[yellow]TCG floor sweep skipped — see log[/yellow]"
-                            )
+                            console.print("[yellow]TCG floor sweep skipped — see log[/yellow]")
 
                     # Quick TCG sales check — only runs when we have a browser.
                     if not ebay_only and session is not None:
@@ -3240,7 +3225,8 @@ def add_inventory(
 
             success_statuses = {"added", "added (manual)", "verified (not saved)"}
             not_added = [
-                r for r in results
+                r
+                for r in results
                 if r["status"] not in success_statuses and r["status"] != "too cheap"
             ]
             if not_added:

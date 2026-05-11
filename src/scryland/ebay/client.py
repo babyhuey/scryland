@@ -885,14 +885,13 @@ class EbayClient:
             body_lower = r.text.lower() if r.text else ""
             # \b prevents 25001 from matching 250010 etc. if eBay ever
             # widens its error-ID space.
-            is_eventual_error = bool(
-                re.search(r'"errorid":\s*25001\b', body_lower)
-            ) or "core inventory service internal error" in body_lower
+            is_eventual_error = (
+                bool(re.search(r'"errorid":\s*25001\b', body_lower))
+                or "core inventory service internal error" in body_lower
+            )
             is_retryable = r.status_code >= 500 or r.status_code == 429 or is_eventual_error
             if not is_retryable or attempt == attempts:
-                raise RuntimeError(
-                    f"PUT inventory_item failed {r.status_code}: {r.text[:500]}"
-                )
+                raise RuntimeError(f"PUT inventory_item failed {r.status_code}: {r.text[:500]}")
             logger.warning(
                 "PUT inventory_item attempt %d/%d hit %d — retrying in %.1fs",
                 attempt,
@@ -1039,9 +1038,7 @@ class EbayClient:
                 bool(re.search(r'"errorid":\s*25604\b', body_lower))
                 or "availability not found" in body_lower
             )
-            is_retryable = (
-                r.status_code >= 500 or r.status_code == 429 or is_eventual_consistency
-            )
+            is_retryable = r.status_code >= 500 or r.status_code == 429 or is_eventual_consistency
             if not is_retryable or attempt == attempts:
                 break
             wait_s = backoff_s
