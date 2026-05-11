@@ -268,6 +268,41 @@ class EbayClient:
             self._own_seller_username = ""  # sentinel
             return None
 
+    async def iter_all_offers(self, *, marketplace_id: str = "EBAY_US") -> list[dict]:
+        """Return every offer for the seller, paginated.
+
+        Used by sync-inventory to refresh the local ebay_listings table from
+        live eBay state — picks up listings created outside scryland, status
+        changes, and post-listing price drift.
+        """
+        offers: list[dict] = []
+        limit = 200
+        offset = 0
+        while True:
+            r = await self._http.get(
+                "/sell/inventory/v1/offer",
+                params={
+                    "marketplace_id": marketplace_id,
+                    "format": "FIXED_PRICE",
+                    "limit": limit,
+                    "offset": offset,
+                },
+                headers=await self._headers(content_json=False),
+            )
+            if r.status_code == 404:
+                # No offers at all — empty seller. Treat as success.
+                return offers
+            if r.status_code >= 300:
+                raise RuntimeError(f"list offers failed {r.status_code}: {r.text[:300]}")
+            body = r.json()
+            batch = body.get("offers") or []
+            offers.extend(batch)
+            total = body.get("total", 0)
+            offset += len(batch)
+            if not batch or offset >= total:
+                break
+        return offers
+
     async def get_inventory_item(self, sku: str) -> dict | None:
         """Fetch an inventory item by SKU.
 
