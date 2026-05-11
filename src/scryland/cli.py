@@ -2473,6 +2473,11 @@ def watch(
                             sign = "+" if total_change > 0 else "-"
                             changes_str += f" ({sign}${abs(total_change):.2f})"
                         st.add_row("TCG this run", changes_str)
+                    elif not ebay_only and session is None:
+                        st.add_row(
+                            "TCG this run",
+                            "[yellow]Skipped — browser unavailable[/yellow]",
+                        )
                     elif not ebay_only:
                         st.add_row("TCG this run", "[green]No changes needed[/green]")
                     # eBay side

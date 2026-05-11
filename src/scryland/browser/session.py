@@ -40,13 +40,12 @@ class BrowserSession:
         try:
             if self._page.is_closed():
                 return False
-            # The page can outlive a closed/crashed browser process.
-            # `browser` is None for persistent contexts that lost their
-            # underlying chromium; otherwise check is_connected() so a
-            # crashed-but-not-yet-cleaned-up browser doesn't pass as alive.
-            browser = self._context.browser
-            if browser is not None and not browser.is_connected():
-                return False
+            # Persistent contexts always report `browser is None`, so
+            # is_connected() can't probe a crashed chromium for us. Force
+            # a property fetch that will throw against a torn-down page —
+            # this is what catches the crashed-but-not-yet-cleaned-up
+            # case the prior is_closed() check misses.
+            _ = self._page.url
             return True
         except Exception:
             return False
