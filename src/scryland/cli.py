@@ -715,6 +715,13 @@ async def _ebay_watch_pass(
 
             planned_updates: list[_PlannedUpdate] = []
             planned_withdraws: list[_PlannedWithdraw] = []
+            # Counters for the uncompetitive-vs-TCG path — surface why
+            # listings aren't being delisted when the user expects them
+            # to be (most often: TCG inventory table is missing rows).
+            uncomp_no_canonical = 0
+            uncomp_no_tcg_row = 0
+            uncomp_no_tcg_price = 0
+            uncomp_gap_too_small = 0
 
             for lst, lowest, exc in lookup_results:
                 if exc is not None:
@@ -741,9 +748,45 @@ async def _ebay_watch_pass(
                     canonical = lst.get("canonical_key")
                     tcg_row = db.find_inventory_by_canonical(canonical) if canonical else None
                     tcg_price = tcg_row["current_price"] if tcg_row else None
-                    if tcg_price is not None and current > 0:
+                    name_short = (lst.get("product_name") or "?")[:40]
+                    if not canonical:
+                        uncomp_no_canonical += 1
+                        logger.debug(
+                            "uncompetitive: '%s' has no canonical_key — can't compare to TCG",
+                            name_short,
+                        )
+                    elif tcg_row is None:
+                        uncomp_no_tcg_row += 1
+                        logger.debug(
+                            "uncompetitive: '%s' canonical=%s not in TCG inventory — "
+                            "can't compare. Run add-inventory or scrape TCG to populate.",
+                            name_short,
+                            canonical[:60],
+                        )
+                    elif tcg_price is None:
+                        uncomp_no_tcg_price += 1
+                        logger.debug(
+                            "uncompetitive: '%s' found TCG row but current_price is null",
+                            name_short,
+                        )
+                    elif current <= 0:
+                        logger.debug(
+                            "uncompetitive: '%s' our eBay price is %s — can't compare",
+                            name_short,
+                            current,
+                        )
+                    else:
                         gap = float(current) - float(tcg_price)
                         if gap > delist_uncompetitive_gap:
+                            logger.debug(
+                                "uncompetitive: '%s' our=$%.2f TCG=$%.2f gap=$%.2f "
+                                "> threshold $%.2f — withdrawing",
+                                name_short,
+                                float(current),
+                                float(tcg_price),
+                                gap,
+                                delist_uncompetitive_gap,
+                            )
                             planned_withdraws.append(
                                 _PlannedWithdraw(
                                     lst=lst,
@@ -754,6 +797,16 @@ async def _ebay_watch_pass(
                                 )
                             )
                             continue
+                        uncomp_gap_too_small += 1
+                        logger.debug(
+                            "uncompetitive: '%s' our=$%.2f TCG=$%.2f gap=$%.2f "
+                            "<= threshold $%.2f — keeping",
+                            name_short,
+                            float(current),
+                            float(tcg_price),
+                            gap,
+                            delist_uncompetitive_gap,
+                        )
 
                 # Total-price undercut math — always respect BOTH the
                 # eBay hard $0.99 minimum AND the user's --ebay-min-price.
@@ -952,6 +1005,22 @@ async def _ebay_watch_pass(
                         exc_info=first_browse_err,
                     )
             console.print(summary)
+            # Visibility for the uncompetitive-delist path. If the user
+            # passes --ebay-delist-uncompetitive-gap but sees no delists,
+            # this line tells them why at a glance — usually "TCG row
+            # missing" because the inventory table isn't synced.
+            if delist_uncompetitive_gap is not None:
+                parts = []
+                if uncomp_no_tcg_row:
+                    parts.append(f"{uncomp_no_tcg_row} no TCG row")
+                if uncomp_no_canonical:
+                    parts.append(f"{uncomp_no_canonical} no canonical_key")
+                if uncomp_no_tcg_price:
+                    parts.append(f"{uncomp_no_tcg_price} TCG price null")
+                if uncomp_gap_too_small:
+                    parts.append(f"{uncomp_gap_too_small} gap under threshold")
+                if parts:
+                    console.print(f"  [dim]Uncompetitive check skipped: {', '.join(parts)}.[/dim]")
             return {
                 "new_sales": new_ebay_sales,
                 "updated": updated,
