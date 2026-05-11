@@ -488,6 +488,31 @@ class InventoryDB:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_active_at_or_below_price(self, threshold: float) -> list[dict]:
+        """Active inventory rows with current_price <= threshold.
+
+        Used by the TCG floor sweep — picks up cards that already sit at
+        the bottom of the market (no differential to flag them in TCG's
+        report, so the standard optimize pass misses them).
+        """
+        rows = self.conn.execute(
+            "SELECT * FROM inventory "
+            "WHERE status = 'active' AND current_price IS NOT NULL "
+            "AND current_price <= ? ORDER BY current_price",
+            (threshold,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_inventory_removed(self, product_name: str, condition: str, finish: str) -> None:
+        """Mark a single inventory row as removed (after a successful delist)."""
+        self.conn.execute(
+            "UPDATE inventory SET status = 'removed', "
+            "last_seen = strftime('%Y-%m-%dT%H:%M:%S','now') "
+            "WHERE product_name = ? AND condition = ? AND finish = ?",
+            (product_name, condition, finish),
+        )
+        self.conn.commit()
+
     def clear_sold(self) -> int:
         """Delete all sold/removed items from the database. Returns count deleted."""
         cursor = self.conn.execute("DELETE FROM inventory WHERE status = 'sold'")
@@ -760,6 +785,9 @@ class InventoryDB:
         else:
             where = "WHERE marketplace = ?"
             params = (marketplace,)
+        # nosec B608 — `where` is one of two hardcoded literals above
+        # ("" or "WHERE marketplace = ?"), and the `marketplace` value is
+        # bound via `params`. No user input ever flows into the SQL string.
         stats = self.conn.execute(
             "SELECT COUNT(*) as total_sales, "
             "SUM(quantity) as total_items_sold, "
@@ -768,7 +796,7 @@ class InventoryDB:
             "SUM(net_amount) as total_net, "
             "AVG(sale_price) as avg_sale_price, "
             "COUNT(DISTINCT order_number) as total_orders "
-            f"FROM sales {where}",
+            f"FROM sales {where}",  # nosec B608
             params,
         ).fetchone()
 
