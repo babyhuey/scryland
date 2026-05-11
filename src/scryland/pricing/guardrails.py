@@ -78,14 +78,18 @@ def is_big_price_drop(
     (percentage) and absolute (dollar) check with AND semantics, so penny
     moves on cheap cards aren't blocked by their large percentage. Set
     max_abs to 0 for pct-only behavior (legacy mode).
+
+    Threshold semantics are inclusive (`>=`): when the user sets
+    `--max-price-change-pct 10`, a drop *exactly equal to* 10% should
+    block, not slip through. The legacy strict `>` was happenstance.
     """
     if new_price >= old_price or old_price <= 0:
         return False
     pct_drop = (old_price - new_price) / old_price * 100
     abs_drop = old_price - new_price
     if max_abs <= 0:
-        return pct_drop > max_pct
-    return pct_drop > max_pct and abs_drop > max_abs
+        return pct_drop >= max_pct
+    return pct_drop >= max_pct and abs_drop >= max_abs
 
 
 class PriceGuardrails:
