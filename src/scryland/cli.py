@@ -1826,11 +1826,6 @@ async def _refresh_ebay_listings(config, db, logger) -> dict:
         console.print(f"[red]eBay auth failed: {exc}[/red]")
         return {"updated": 0, "missing_local": 0, "total_remote": 0, "error": str(exc)}
 
-    async with EbayClient(config, auth, passphrase) as client:
-        offers = await client.iter_all_offers()
-
-    console.print(f"Fetched [cyan]{len(offers)}[/cyan] offer(s) from eBay.")
-
     by_sku = {
         row["sku"]: row
         for row in db.conn.execute(
@@ -1838,6 +1833,16 @@ async def _refresh_ebay_listings(config, db, logger) -> dict:
             "is_foil FROM ebay_listings"
         ).fetchall()
     }
+    skus = list(by_sku.keys())
+    if not skus:
+        console.print("  [dim]No local eBay listings to refresh.[/dim]")
+        return {"updated": 0, "missing_local": 0, "total_remote": 0}
+
+    console.print(f"Fetching offers for {len(skus)} local SKU(s)…")
+    async with EbayClient(config, auth, passphrase) as client:
+        offers = await client.iter_offers_for_skus(skus)
+
+    console.print(f"Fetched [cyan]{len(offers)}[/cyan] offer(s) from eBay.")
 
     updated = 0
     missing_local: list[str] = []

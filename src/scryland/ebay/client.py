@@ -268,40 +268,54 @@ class EbayClient:
             self._own_seller_username = ""  # sentinel
             return None
 
-    async def iter_all_offers(self, *, marketplace_id: str = "EBAY_US") -> list[dict]:
-        """Return every offer for the seller, paginated.
+    async def iter_offers_for_skus(
+        self,
+        skus: list[str],
+        *,
+        marketplace_id: str = "EBAY_US",
+        concurrency: int = 8,
+    ) -> list[dict]:
+        """Fetch offers for each SKU in `skus`, return them flat.
 
-        Used by sync-inventory to refresh the local ebay_listings table from
-        live eBay state — picks up listings created outside scryland, status
-        changes, and post-listing price drift.
+        eBay's Sell Inventory API has no bulk "list all my offers" endpoint
+        — `/sell/inventory/v1/offer` requires the `sku` query parameter
+        (errorId 25707 if you omit it). So sync-inventory enumerates SKUs
+        from our local DB and GETs per-SKU, with bounded concurrency.
+
+        SKUs whose lookup 404s or returns no offers are silently dropped —
+        they were ended/withdrawn outside scryland and are no longer live.
         """
-        offers: list[dict] = []
-        limit = 200
-        offset = 0
-        while True:
-            r = await self._http.get(
-                "/sell/inventory/v1/offer",
-                params={
-                    "marketplace_id": marketplace_id,
-                    "format": "FIXED_PRICE",
-                    "limit": limit,
-                    "offset": offset,
-                },
-                headers=await self._headers(content_json=False),
-            )
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _fetch(sku: str) -> list[dict]:
+            async with sem:
+                r = await self._http.get(
+                    "/sell/inventory/v1/offer",
+                    params={
+                        "sku": sku,
+                        "marketplace_id": marketplace_id,
+                        "format": "FIXED_PRICE",
+                        "limit": 100,
+                    },
+                    headers=await self._headers(content_json=False),
+                )
             if r.status_code == 404:
-                # No offers at all — empty seller. Treat as success.
-                return offers
+                return []
             if r.status_code >= 300:
-                raise RuntimeError(f"list offers failed {r.status_code}: {r.text[:300]}")
-            body = r.json()
-            batch = body.get("offers") or []
-            offers.extend(batch)
-            total = body.get("total", 0)
-            offset += len(batch)
-            if not batch or offset >= total:
-                break
-        return offers
+                logger.warning(
+                    "list offers for sku %s failed %d: %s",
+                    sku,
+                    r.status_code,
+                    r.text[:200],
+                )
+                return []
+            return r.json().get("offers") or []
+
+        results = await asyncio.gather(*(_fetch(sku) for sku in skus))
+        flat: list[dict] = []
+        for batch in results:
+            flat.extend(batch)
+        return flat
 
     async def get_inventory_item(self, sku: str) -> dict | None:
         """Fetch an inventory item by SKU.
