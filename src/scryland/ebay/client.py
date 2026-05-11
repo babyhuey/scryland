@@ -682,13 +682,13 @@ class EbayClient:
 
         # If Browse returned results but all got filtered out, that's
         # notable — either the matcher is overly strict or the set has
-        # only noise. Log at INFO so users running default log level
-        # can notice a matching regression. Include up to 2 sample
-        # titles so a foil-heavy set (legit rejection) can be told
-        # apart from a matcher bug (false positives).
+        # Demoted to debug — these fire on legit cases (foil-only sets,
+        # sole-listing self-rejections) and just clutter the watch log.
+        # The samples-and-rej payload is still useful when investigating
+        # "why didn't this card get repriced?" via --log-level debug.
         if items and not candidates:
             samples = [(it.get("title") or "")[:80] for it in items[:2]]
-            logger.info(
+            logger.debug(
                 "Browse '%s': %d raw results, all filtered out (rej=%s, samples=%s)",
                 q,
                 len(items),
