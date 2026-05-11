@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -581,8 +582,11 @@ class EbayClient:
                 rej["name_miss"] += 1
                 continue
             # Finish match: listings with "foil" in title when we want
-            # non-foil, or no-foil in title when we want foil.
-            title_has_foil = "foil" in title
+            # non-foil, or no-foil in title when we want foil. Strip
+            # "non[- ]?foil"/"nonfoil" first so a properly-tagged non-foil
+            # listing isn't rejected by the substring "foil".
+            scrubbed = re.sub(r"\bnon[\s-]?foil\b", "", title)
+            title_has_foil = bool(re.search(r"\bfoil\b|\betched\b", scrubbed))
             if finish_is_foil and not title_has_foil:
                 rej["foil_mismatch"] += 1
                 continue
@@ -630,13 +634,17 @@ class EbayClient:
         # If Browse returned results but all got filtered out, that's
         # notable — either the matcher is overly strict or the set has
         # only noise. Log at INFO so users running default log level
-        # can notice a matching regression.
+        # can notice a matching regression. Include up to 2 sample
+        # titles so a foil-heavy set (legit rejection) can be told
+        # apart from a matcher bug (false positives).
         if items and not candidates:
+            samples = [(it.get("title") or "")[:80] for it in items[:2]]
             logger.info(
-                "Browse '%s': %d raw results, all filtered out (rej=%s)",
+                "Browse '%s': %d raw results, all filtered out (rej=%s, samples=%s)",
                 q,
                 len(items),
                 rej,
+                samples,
             )
 
         if not candidates:
@@ -860,14 +868,67 @@ class EbayClient:
         if listing.category_id not in {"183454", "261328", "183050"}:
             body["conditionDescription"] = listing.condition_description
 
-        r = await self._http.put(
-            f"/sell/inventory/v1/inventory_item/{listing.sku}",
-            headers=await self._headers(),
-            json=body,
-        )
-        _extract_warnings(r, warnings)
-        if r.status_code >= 300:
-            raise RuntimeError(f"PUT inventory_item failed {r.status_code}: {r.text[:500]}")
+        # Retry on 5xx and on errorId 25001 ("Internal Server Error" /
+        # "Core Inventory Service internal error") which eBay returns
+        # with status 400 OR 500 transiently.
+        import asyncio
+
+        attempts = 4
+        backoff_s = 2.0
+        for attempt in range(1, attempts + 1):
+            r = await self._http.put(
+                f"/sell/inventory/v1/inventory_item/{listing.sku}",
+                headers=await self._headers(),
+                json=body,
+            )
+            _extract_warnings(r, warnings)
+            if r.status_code < 300:
+                break
+            body_lower = r.text.lower() if r.text else ""
+            is_eventual_error = (
+                '"errorid":25001' in body_lower
+                or "core inventory service internal error" in body_lower
+            )
+            is_retryable = r.status_code >= 500 or r.status_code == 429 or is_eventual_error
+            if not is_retryable or attempt == attempts:
+                raise RuntimeError(
+                    f"PUT inventory_item failed {r.status_code}: {r.text[:500]}"
+                )
+            logger.warning(
+                "PUT inventory_item attempt %d/%d hit %d — retrying in %.1fs",
+                attempt,
+                attempts,
+                r.status_code,
+                backoff_s,
+            )
+            await asyncio.sleep(backoff_s)
+            backoff_s *= 2
+
+        # If eBay flagged any aspect rename, GET the item back and diff the
+        # aspect keys so we can see exactly which name(s) got rewritten.
+        # This converts the opaque "Some item specifics were renamed"
+        # warning into an actionable mapping like {"Set": "Set Name"}.
+        if any("renamed" in w.lower() for w in warnings):
+            try:
+                g = await self._http.get(
+                    f"/sell/inventory/v1/inventory_item/{listing.sku}",
+                    headers=await self._headers(content_json=False),
+                )
+                if g.status_code < 300:
+                    stored = (g.json().get("product") or {}).get("aspects") or {}
+                    sent_keys = set(listing.aspects.keys())
+                    stored_keys = set(stored.keys())
+                    dropped = sent_keys - stored_keys
+                    added = stored_keys - sent_keys
+                    if dropped or added:
+                        logger.warning(
+                            "eBay aspect rename detected — sent but missing: %s; "
+                            "appeared after rename: %s",
+                            sorted(dropped),
+                            sorted(added),
+                        )
+            except Exception:
+                logger.debug("Could not GET inventory item to diff aspects", exc_info=True)
 
     async def _create_offer(self, listing: EbayListing, warnings: list[str]) -> str:
         body = {
@@ -970,8 +1031,18 @@ class EbayClient:
                 )
 
             last_status, last_text = r.status_code, r.text[:500]
-            # Retry transient errors (5xx) and rate-limits (429).
-            is_retryable = r.status_code >= 500 or r.status_code == 429
+            # Retry transient errors (5xx) and rate-limits (429). Also retry
+            # 25604 "Availability not found" — eBay's inventory service is
+            # eventually-consistent, so the availability data from our PUT
+            # sometimes hasn't propagated to publish yet.
+            body_lower = r.text.lower() if r.text else ""
+            is_eventual_consistency = (
+                r.status_code == 400
+                and ('"errorid":25604' in body_lower or "availability not found" in body_lower)
+            )
+            is_retryable = (
+                r.status_code >= 500 or r.status_code == 429 or is_eventual_consistency
+            )
             if not is_retryable or attempt == attempts:
                 break
             wait_s = backoff_s

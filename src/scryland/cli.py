@@ -254,6 +254,126 @@ async def _end_tcg_listing_by_canonical(session, config, db, canonical_key: str)
         return False
 
 
+async def _tcg_floor_sweep(session, config, db, logger, threshold: float) -> int:
+    """End TCG listings whose price is at or below `threshold`.
+
+    Watch's main path uses TCG's Price Differential Report, which only
+    flags rows where our price is *above* the market lowest. A card that
+    has already drifted to the floor (e.g. $0.01) leaves no differential
+    and would sit live indefinitely. This sweep targets only the rows we
+    already know about in the DB at <= threshold, so it's cheap (1 manage
+    nav per candidate, not per product).
+    """
+    from scryland.browser.flaky import retry_on_flaky
+    from scryland.browser.pages.inventory import InventoryPage
+    from scryland.browser.pages.pricing import PricingPage
+
+    if session is None:
+        return 0
+    candidates = db.get_active_at_or_below_price(threshold)
+    if not candidates:
+        return 0
+
+    console.print(
+        f"  [dim]TCG floor sweep: {len(candidates)} listing(s) at or "
+        f"below ${threshold:.2f}…[/dim]"
+    )
+    inventory_page = InventoryPage(session.page, config)
+    pricing_page = PricingPage(session.page, config)
+    delisted = 0
+    # Group by product_name so we save once per product even if multiple
+    # condition rows are below the floor.
+    by_product: dict[str, list[dict]] = {}
+    for row in candidates:
+        by_product.setdefault(row["product_name"], []).append(row)
+
+    await retry_on_flaky(
+        lambda: inventory_page.navigate(),
+        page=session.page,
+        label="floor: inventory.navigate",
+    )
+    for product_name, rows in by_product.items():
+        try:
+            await session.human_delay()
+            await retry_on_flaky(
+                lambda name=product_name: inventory_page.click_manage_for_product(name),
+                page=session.page,
+                label="floor: click_manage",
+            )
+            # Manage page navigation is async — wait for it to settle
+            # before querying the pricing table, otherwise query_selector
+            # races the navigation and raises "execution context destroyed".
+            try:
+                await session.page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                logger.debug(
+                    "floor: networkidle timeout after click_manage — proceeding"
+                )
+            zeroed = 0
+            for row in rows:
+                try:
+                    await retry_on_flaky(
+                        lambda cond=row["condition"]: pricing_page.set_quantity_zero(cond),
+                        page=session.page,
+                        label="floor: set_quantity_zero",
+                    )
+                    zeroed += 1
+                except Exception:
+                    logger.warning(
+                        "Floor sweep: failed to zero qty for %s (%s)",
+                        product_name,
+                        row["condition"],
+                        exc_info=True,
+                    )
+            if zeroed:
+                try:
+                    await retry_on_flaky(
+                        lambda: pricing_page.save_changes(),
+                        page=session.page,
+                        label="floor: save_changes",
+                    )
+                    for row in rows:
+                        db.mark_inventory_removed(
+                            row["product_name"],
+                            row["condition"],
+                            row["finish"] or "",
+                        )
+                    delisted += zeroed
+                    console.print(
+                        f"    [red]Delisted {zeroed}× '{product_name}' "
+                        f"at or below ${threshold:.2f}[/red]"
+                    )
+                except Exception:
+                    logger.warning(
+                        "Floor sweep save failed for '%s' — %d delist(s) "
+                        "NOT persisted",
+                        product_name,
+                        zeroed,
+                        exc_info=True,
+                    )
+                    console.print(
+                        f"    [red]Save failed — '{product_name}' delist(s) not applied[/red]"
+                    )
+            await session.human_delay()
+            # reapply_filter=True is critical here: TCG drops the
+            # 'My Inventory Only' state across the save→Back-to-Inventory
+            # redirect, so without re-applying, the next iteration's
+            # click_manage_for_product paginates the global catalog and
+            # fails to find any of the user's listings.
+            await retry_on_flaky(
+                lambda: inventory_page.go_back_to_inventory(reapply_filter=True),
+                page=session.page,
+                label="floor: go_back_to_inventory",
+            )
+        except Exception:
+            logger.warning(
+                "Floor sweep failed for '%s' — skipped this run",
+                product_name,
+                exc_info=True,
+            )
+    return delisted
+
+
 async def _ebay_watch_pass(
     config,
     db,
@@ -263,6 +383,7 @@ async def _ebay_watch_pass(
     min_price: float = 0.99,
     max_price: float | None = None,
     delist_below: float | None = None,
+    delist_uncompetitive_gap: float | None = None,
 ) -> dict:
     """One iteration of the eBay watch sweep inside the main watch loop.
 
@@ -520,6 +641,11 @@ async def _ebay_watch_pass(
                 f"(floor ${min_price:.2f}"
                 + (f", ceiling ${max_price:.2f}" if max_price else "")
                 + (f", delist<${delist_below:.2f}" if delist_below else "")
+                + (
+                    f", delist if >TCG+${delist_uncompetitive_gap:.2f}"
+                    if delist_uncompetitive_gap
+                    else ""
+                )
                 + ")…"
             )
             updated = 0
@@ -572,6 +698,8 @@ async def _ebay_watch_pass(
             class _PlannedWithdraw:
                 lst: dict
                 market_low: float
+                reason: str = "market_below_floor"  # or "uncompetitive_vs_tcg"
+                tcg_price: float | None = None
 
             planned_updates: list[_PlannedUpdate] = []
             planned_withdraws: list[_PlannedWithdraw] = []
@@ -590,6 +718,31 @@ async def _ebay_watch_pass(
                 if delist_below is not None and lowest < delist_below:
                     planned_withdraws.append(_PlannedWithdraw(lst=lst, market_low=float(lowest)))
                     continue
+
+                # Delist if our eBay total is meaningfully above the TCG
+                # total for the same canonical card. Buyers comparison-shop
+                # TCG; if we're $0.50+ over with the same shipping, the
+                # listing is dead weight. Assumes TCG shipping ≈ our eBay
+                # shipping (config.ebay_shipping_cost), so the price-gap
+                # condition collapses to: our_ebay_price - tcg_price > gap.
+                if delist_uncompetitive_gap is not None:
+                    canonical = lst.get("canonical_key")
+                    tcg_row = (
+                        db.find_inventory_by_canonical(canonical) if canonical else None
+                    )
+                    tcg_price = tcg_row["current_price"] if tcg_row else None
+                    if tcg_price is not None and current > 0:
+                        gap = float(current) - float(tcg_price)
+                        if gap > delist_uncompetitive_gap:
+                            planned_withdraws.append(
+                                _PlannedWithdraw(
+                                    lst=lst,
+                                    market_low=float(lowest),
+                                    reason="uncompetitive_vs_tcg",
+                                    tcg_price=float(tcg_price),
+                                )
+                            )
+                            continue
 
                 # Total-price undercut math — always respect BOTH the
                 # eBay hard $0.99 minimum AND the user's --ebay-min-price.
@@ -697,13 +850,23 @@ async def _ebay_watch_pass(
                     {
                         "name": p.lst["product_name"],
                         "market_low": p.market_low,
+                        "reason": p.reason,
+                        "tcg_price": p.tcg_price,
                     }
                 )
-                console.print(
-                    f"    [red]{p.lst['product_name'][:40]} "
-                    f"eBay lowest ${p.market_low:.2f} < ${delist_below:.2f} "
-                    f"— withdrew listing[/red]"
-                )
+                if p.reason == "uncompetitive_vs_tcg":
+                    console.print(
+                        f"    [red]{p.lst['product_name'][:40]} "
+                        f"our ${(p.lst['price'] or 0):.2f} vs TCG "
+                        f"${p.tcg_price:.2f} (gap >${delist_uncompetitive_gap:.2f}) "
+                        f"— withdrew listing[/red]"
+                    )
+                else:
+                    console.print(
+                        f"    [red]{p.lst['product_name'][:40]} "
+                        f"eBay lowest ${p.market_low:.2f} < ${delist_below:.2f} "
+                        f"— withdrew listing[/red]"
+                    )
 
             update_failed = 0
             for p, ok in zip(planned_updates, update_ok, strict=True):
@@ -2001,8 +2164,9 @@ def sales_report(ctx: click.Context) -> None:
 @click.option(
     "--delist-below",
     type=float,
-    default=None,
-    help="Remove listings where TCG Lowest drops below this price",
+    default=0.01,
+    help="End TCG listings whose price is at or below this value. "
+    "Default: $0.01 (only true penny listings). Pass 0 to disable.",
 )
 @click.option(
     "--ebay/--no-ebay",
@@ -2036,30 +2200,42 @@ def sales_report(ctx: click.Context) -> None:
     help="Withdraw eBay listings where the competitor lowest drops "
     "below this price (instead of undercutting to the floor).",
 )
+@click.option(
+    "--ebay-delist-uncompetitive-gap",
+    type=float,
+    default=None,
+    help="Withdraw eBay listings where our price is more than this many "
+    "dollars above the matching TCG listing's price (assumes similar "
+    "shipping). Use 0.50 to delist when ~$0.50+ over TCG. Off by default.",
+)
 @click.pass_context
 def watch(
     ctx: click.Context,
     interval: int,
     volatile: bool,
-    delist_below: float | None,
+    delist_below: float,
     ebay: bool,
     ebay_only: bool,
     ebay_min_price: float,
     ebay_max_price: float | None,
     ebay_delist_below: float | None,
+    ebay_delist_uncompetitive_gap: float | None,
 ) -> None:
     """Recurring multi-marketplace price optimizer + sales watcher.
 
     Each iteration does (unless --ebay-only):
       1. TCG: Price Differential Report → apply updates / delists.
-      2. TCG: check orders for new sales → record to DB.
+      2. TCG: floor sweep — end listings priced at/below --delist-below
+         (default $0.01; pass 0 to disable). Catches cards already at
+         the bottom of market that the differential report misses.
+      3. TCG: check orders for new sales → record to DB.
     Then always (unless --no-ebay):
-      3. eBay: fetch recent orders → record sales → mark our listings sold
+      4. eBay: fetch recent orders → record sales → mark our listings sold
          → cross-delist matching TCG listings (via the open browser).
-      4. eBay: for each TCG sale just recorded, withdraw matching eBay offers.
-      5. eBay: Browse-API undercut sweep — bump our prices to (lowest-$0.01),
+      5. eBay: for each TCG sale just recorded, withdraw matching eBay offers.
+      6. eBay: Browse-API undercut sweep — bump our prices to (lowest-$0.01),
          floored by --ebay-min-price, ceilinged by --ebay-max-price.
-      6. eBay: if --ebay-delist-below set, end listings when market drops
+      7. eBay: if --ebay-delist-below set, end listings when market drops
          below that threshold.
 
     --ebay-only skips the browser entirely — all API, no TCG scraping.
@@ -2118,6 +2294,26 @@ def watch(
                     f"\n[bold]═══ Run #{run_count} at {now} (every {interval}m) ═══[/bold]"
                 )
 
+                # Recreate a dead browser session (e.g. crash, network reset,
+                # TargetClosedError from a prior run) before doing any TCG work.
+                if session is not None and not session.is_alive():
+                    console.print(
+                        "[yellow]Browser session lost — restarting...[/yellow]"
+                    )
+                    try:
+                        await session.close()
+                    except Exception:
+                        pass
+                    session = BrowserSession(config)
+                    try:
+                        await session.start()
+                        await session.ensure_logged_in()
+                    except Exception:
+                        logger.exception("Failed to restart browser session")
+                        console.print(
+                            "[red]Could not restart browser — skipping TCG this run[/red]"
+                        )
+
                 opt_result = OptimizeResult()
                 total_change = 0.0
                 # Initialize so the post-loop detail-table code doesn't
@@ -2137,6 +2333,21 @@ def watch(
                             f"(delisted {opt_result.delisted}). "
                             f"Net change: {direction} ${abs(total_change):.2f}"
                         )
+
+                    # TCG floor sweep — covers the gap where a card has
+                    # drifted to the bottom of market and stops appearing
+                    # in the differential report (no diff = no row).
+                    if not ebay_only and delist_below and delist_below > 0:
+                        try:
+                            floor_delisted = await _tcg_floor_sweep(
+                                session, config, db, logger, delist_below
+                            )
+                            opt_result.delisted += floor_delisted
+                        except Exception:
+                            logger.warning("TCG floor sweep failed", exc_info=True)
+                            console.print(
+                                "[yellow]TCG floor sweep skipped — see log[/yellow]"
+                            )
 
                     # Quick TCG sales check — only runs when we have a browser.
                     if not ebay_only:
@@ -2195,6 +2406,7 @@ def watch(
                                     min_price=ebay_min_price,
                                     max_price=ebay_max_price,
                                     delist_below=ebay_delist_below,
+                                    delist_uncompetitive_gap=ebay_delist_uncompetitive_gap,
                                 )
                                 or {}
                             )
@@ -2436,7 +2648,7 @@ def csv_optimize(ctx: click.Context, input_file: Path, output: Path | None, dry_
     type=float,
     default=None,
     help="Pre-filter: skip cards with CSV price below this before searching. "
-    "Default: 30%% below --min-price. Use 0 to disable.",
+    "Default: same as --min-price. Use 0 to disable.",
 )
 @click.option(
     "--price-strategy",
@@ -2449,6 +2661,13 @@ def csv_optimize(ctx: click.Context, input_file: Path, output: Path | None, dry_
     "--defer-manual/--no-defer-manual",
     default=True,
     help="Defer cards needing manual review to the end instead of pausing inline (default: on)",
+)
+@click.option(
+    "--include-sold",
+    is_flag=True,
+    default=False,
+    help="Re-list cards even if the DB shows a prior sale. Use when the CSV "
+    "is your full current inventory (i.e. you re-acquired previously-sold cards).",
 )
 @click.pass_context
 def add_inventory(
@@ -2463,11 +2682,17 @@ def add_inventory(
     csv_min_price: float | None,
     price_strategy: str,
     defer_manual: bool,
+    include_sold: bool,
 ) -> None:
     """Add cards from a Mythic Tools CSV export to TCGPlayer inventory.
 
     Reads your Mythic Tools export, searches for each card on TCGPlayer,
     and adds it to your inventory with the specified price and quantity.
+
+    After the run, writes <CSV_FILE>_priced.csv with the real TCG-found
+    prices substituted into the Price columns. Use that file on subsequent
+    runs together with --csv-min-price to skip cards that already hit the
+    floor (e.g. $0.01).
     """
     config: ScrylandConfig = ctx.obj["config"]
     logger = ctx.obj["logger"]
@@ -2577,6 +2802,7 @@ def add_inventory(
         return
 
     async def _run() -> None:
+        from scryland.browser.flaky import retry_on_flaky
         from scryland.browser.pages.add_inventory import AddInventoryPage
         from scryland.browser.session import BrowserSession
         from scryland.db import InventoryDB
@@ -2607,11 +2833,16 @@ def add_inventory(
                 # Check local DB first — skip if already listed or sold
                 finish = "Foil" if card.is_foil else ""
                 db_status = db.is_known(card.card_name, card.tcg_condition, finish)
+                # When the CSV is the user's full current inventory, an
+                # exact "sold" row just means we sold this copy in the past
+                # but they own one again — don't let that skip the card.
+                if include_sold and db_status == "sold":
+                    db_status = None
                 if not db_status:
                     # Fuzzy match for active listings
                     if db.is_listed_fuzzy(card.card_name, card.tcg_condition, finish):
                         db_status = "active"
-                if not db_status:
+                if not db_status and not include_sold:
                     # Fuzzy match for sold items — if any version of this card was sold, skip it
                     front_face = card.card_name.split("//")[0].strip()
                     sold_match = db.conn.execute(
@@ -2644,6 +2875,19 @@ def add_inventory(
 
                     # Find and click Add/Manage
                     found, match_score = await add_page.find_and_click_add(card)
+
+                    # Fallback: a strict set-filter search can miss cards
+                    # whose Mythic Tools set name doesn't line up exactly
+                    # with TCG's dropdown (promos, special editions, etc.).
+                    # Retry once with no set filter — find_and_click_add's
+                    # collector-# matcher will pick the right product from
+                    # the unfiltered results.
+                    if not found:
+                        logger.info("Retrying '%s' without set filter", card.card_name)
+                        await add_page.search_for_card(card, apply_set_filter=False)
+                        await session.dismiss_popups()
+                        found, match_score = await add_page.find_and_click_add(card)
+
                     if not found:
                         if defer_manual:
                             csv_price = float(card.effective_price)
@@ -2882,11 +3126,25 @@ def add_inventory(
                     # Save() may have triggered a redirect — wait for it to settle,
                     # then navigate directly to catalog (more reliable than clicking
                     # a "Back to Inventory" link that may no longer exist).
+                    # The goto races the save's in-flight redirect, which can
+                    # raise net::ERR_ABORTED — retry_on_flaky settles and re-tries.
                     try:
                         await session.page.wait_for_load_state("domcontentloaded", timeout=10000)
                     except Exception:
                         pass
-                    await session.page.goto(config.inventory_url, wait_until="domcontentloaded")
+                    try:
+                        await retry_on_flaky(
+                            lambda: session.page.goto(
+                                config.inventory_url, wait_until="domcontentloaded"
+                            ),
+                            page=session.page,
+                            label="post-save goto inventory",
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Could not return to catalog after save (continuing)",
+                            exc_info=True,
+                        )
                     try:
                         await session.page.wait_for_load_state("networkidle", timeout=10000)
                     except Exception:
@@ -2946,6 +3204,78 @@ def add_inventory(
                 f"[red]{failed} failed[/red]"
             )
 
+            # Focused "not added" list — everything that didn't list,
+            # excluding the intentional below-min-price drops. Helps the
+            # user see at a glance which cards still need attention without
+            # scanning the full per-card summary above.
+            success_statuses = {"added", "added (manual)", "verified (not saved)"}
+            not_added = [
+                r for r in results
+                if r["status"] not in success_statuses and r["status"] != "too cheap"
+            ]
+            if not_added:
+                missed = RichTable(title=f"Not Added ({len(not_added)})")
+                missed.add_column("Card", style="cyan", max_width=35)
+                missed.add_column("Set", max_width=25)
+                missed.add_column("Condition")
+                missed.add_column("Finish")
+                missed.add_column("Reason", style="yellow")
+                for r in not_added:
+                    c = r["card"]
+                    missed.add_row(
+                        c.card_name,
+                        c.set_name,
+                        c.tcg_condition,
+                        c.finish,
+                        r["status"],
+                    )
+                console.print()
+                console.print(missed)
+
+            # Rewrite the CSV with the real TCG-found prices so subsequent
+            # runs replace the Mythic Tools "guess" price with what we
+            # actually saw on TCG. The existing --csv-min-price pre-filter
+            # will then automatically skip floor cards on the next run.
+            price_overrides: dict[tuple[str, str, str], Decimal] = {}
+            for r in results:
+                price = r.get("price")
+                if price is None:
+                    continue
+                c = r["card"]
+                key = (c.card_name, c.condition, c.finish)
+                # If a key already exists, prefer the lower price (floor
+                # signal is the one we want to preserve across re-runs).
+                existing = price_overrides.get(key)
+                new_dec = Decimal(str(price))
+                if existing is None or new_dec < existing:
+                    price_overrides[key] = new_dec
+
+            if price_overrides:
+                from scryland.mythic_csv import write_priced_csv
+
+                # Path.stem strips the LAST suffix, which mangles names like
+                # "Mythic Tools List Export (all.ards)" — the ".ards)" gets
+                # treated as an extension and the closing paren disappears.
+                # Only treat ".csv" (case-insensitive) as a real extension to
+                # replace; otherwise just append "_priced.csv" to the full name.
+                if csv_file.suffix.lower() == ".csv":
+                    priced_path = csv_file.with_name(f"{csv_file.stem}_priced.csv")
+                else:
+                    priced_path = csv_file.with_name(f"{csv_file.name}_priced.csv")
+                try:
+                    n_updated = write_priced_csv(csv_file, priced_path, price_overrides)
+                    console.print()
+                    console.print(
+                        f"[bold green]✓ Wrote {n_updated} TCG-found price(s) to:[/bold green]"
+                    )
+                    console.print(f"  [cyan]{priced_path}[/cyan]")
+                    console.print(
+                        "[dim]  Re-run with this file to skip floor cards via "
+                        "--csv-min-price.[/dim]"
+                    )
+                except Exception:
+                    logger.warning("Could not write priced CSV", exc_info=True)
+
             # Handle deferred manual review cards
             if needs_review:
                 console.print(
@@ -2956,11 +3286,14 @@ def add_inventory(
                 review_table.add_column("Card", style="cyan")
                 review_table.add_column("Set")
                 review_table.add_column("Collector #", style="yellow")
+                review_table.add_column("Qty", justify="right")
                 review_table.add_column("TCG Low", justify="right")
                 for item in needs_review:
                     c = item["card"]
                     p = f"${item['price']:.2f}" if item["price"] else "-"
-                    review_table.add_row(c.card_name, c.set_name, c.collector_number, p)
+                    review_table.add_row(
+                        c.card_name, c.set_name, c.collector_number, str(c.quantity), p
+                    )
                 console.print(review_table)
 
                 console.print("\n[bold]Browser is open — add these manually now.[/bold]")
@@ -2969,7 +3302,8 @@ def add_inventory(
                     console.print(
                         f"\n({idx + 1}/{len(needs_review)}) "
                         f"[cyan]{c.card_name}[/cyan] — {c.set_name} "
-                        f"(collector #{c.collector_number})"
+                        f"(collector #{c.collector_number}) "
+                        f"[bold]x{c.quantity}[/bold]"
                     )
                     try:
                         # Search for the card
@@ -3780,6 +4114,10 @@ def list_on_ebay(
 
         listed = 0
         failed = 0
+        skipped = 0
+        # Per-card outcome rows for the end-of-run summary (mirrors
+        # add-inventory's results table): {card, status, price, listing_id}.
+        results: list[dict] = []
 
         from scryland.db import canonical_key
 
@@ -3806,6 +4144,15 @@ def list_on_ebay(
                 if existing and existing.get("status") == "active":
                     if skip_existing:
                         console.print("  [dim]Already listed — skipping (--skip-existing)[/dim]")
+                        skipped += 1
+                        results.append(
+                            {
+                                "card": card,
+                                "status": "already listed",
+                                "price": existing.get("price"),
+                                "listing_id": existing.get("listing_id"),
+                            }
+                        )
                         continue
                     if fast_update and not draft and existing.get("offer_id"):
                         ok = await _fast_update_ebay_price(
@@ -3819,8 +4166,24 @@ def list_on_ebay(
                         )
                         if ok:
                             listed += 1
+                            results.append(
+                                {
+                                    "card": card,
+                                    "status": "price updated",
+                                    "price": existing.get("price"),
+                                    "listing_id": existing.get("listing_id"),
+                                }
+                            )
                         else:
                             failed += 1
+                            results.append(
+                                {
+                                    "card": card,
+                                    "status": "price update failed",
+                                    "price": None,
+                                    "listing_id": existing.get("listing_id"),
+                                }
+                            )
                         continue
 
                 info = await sf.find_card(card.card_name, card.set_name, card.collector_number)
@@ -3862,6 +4225,14 @@ def list_on_ebay(
                                 f"skipping[/yellow]"
                             )
                             failed += 1
+                            results.append(
+                                {
+                                    "card": card,
+                                    "status": "too cheap (no eBay match)",
+                                    "price": csv_price,
+                                    "listing_id": None,
+                                }
+                            )
                             continue
                         console.print(
                             f"  [dim]Undercut: no eBay matches found — using CSV ${price:.2f}[/dim]"
@@ -3899,6 +4270,14 @@ def list_on_ebay(
                             f"${min_price:.2f} and --no-undercut — skipping[/yellow]"
                         )
                         failed += 1
+                        results.append(
+                            {
+                                "card": card,
+                                "status": "too cheap (--no-undercut)",
+                                "price": csv_price,
+                                "listing_id": None,
+                            }
+                        )
                         continue
 
                 # Clamp to eBay's hard $0.99 minimum — cheaper than catching
@@ -3919,9 +4298,29 @@ def list_on_ebay(
                     logger.warning("eBay publish failed for %s", card.card_name, exc_info=True)
                     console.print(f"  [red]Failed: {exc}[/red]")
                     failed += 1
+                    # Trim the eBay JSON blob — keep just the human message.
+                    err_msg = str(exc)
+                    if len(err_msg) > 80:
+                        err_msg = err_msg[:77] + "..."
+                    results.append(
+                        {
+                            "card": card,
+                            "status": f"publish failed: {err_msg}",
+                            "price": price,
+                            "listing_id": None,
+                        }
+                    )
                     continue
 
                 listed += 1
+                results.append(
+                    {
+                        "card": card,
+                        "status": "draft" if result.draft else "live",
+                        "price": price,
+                        "listing_id": result.listing_id,
+                    }
+                )
                 try:
                     db.upsert_ebay_listing(
                         sku=listing.sku,
@@ -3956,7 +4355,83 @@ def list_on_ebay(
                 for w in result.warnings:
                     console.print(f"    [yellow]warning: {w}[/yellow]")
 
-        console.print(f"\n[bold]Done: {listed} listed, {failed} failed.[/bold]")
+        # End-of-run summary table mirroring add-inventory's shape.
+        if results:
+            from rich.table import Table as RichTable
+
+            console.print()
+            summary = RichTable(title="List on eBay Summary")
+            summary.add_column("Card", style="cyan", max_width=35)
+            summary.add_column("Set", max_width=25)
+            summary.add_column("Cond")
+            summary.add_column("Foil")
+            summary.add_column("Price", justify="right")
+            summary.add_column("Qty", justify="right")
+            summary.add_column("Status")
+
+            success_statuses = {"live", "draft", "price updated"}
+            for r in results:
+                c = r["card"]
+                price = r.get("price")
+                price_str = f"${price:.2f}" if price else "-"
+                status = r["status"]
+                if status == "live":
+                    status_cell = "[green]live[/green]"
+                elif status == "draft":
+                    status_cell = "[cyan]draft[/cyan]"
+                elif status == "price updated":
+                    status_cell = "[green]price updated[/green]"
+                elif status == "already listed":
+                    status_cell = "[dim]already listed[/dim]"
+                elif status.startswith("too cheap"):
+                    status_cell = f"[dim]{status}[/dim]"
+                else:
+                    status_cell = f"[red]{status}[/red]"
+                summary.add_row(
+                    c.card_name,
+                    c.set_name,
+                    c.tcg_condition,
+                    "foil" if c.is_foil else "",
+                    price_str,
+                    str(c.quantity),
+                    status_cell,
+                )
+            console.print(summary)
+
+            # Focused "Not Listed" table — everything that didn't end up
+            # live or draft, excluding the intentional "too cheap" drops.
+            not_listed = [
+                r
+                for r in results
+                if r["status"] not in success_statuses
+                and not r["status"].startswith("too cheap")
+                and r["status"] != "already listed"
+            ]
+            if not_listed:
+                missed = RichTable(title=f"Not Listed ({len(not_listed)})")
+                missed.add_column("Card", style="cyan", max_width=35)
+                missed.add_column("Set", max_width=25)
+                missed.add_column("Cond")
+                missed.add_column("Foil")
+                missed.add_column("Reason", style="yellow")
+                for r in not_listed:
+                    c = r["card"]
+                    missed.add_row(
+                        c.card_name,
+                        c.set_name,
+                        c.tcg_condition,
+                        "foil" if c.is_foil else "",
+                        r["status"],
+                    )
+                console.print()
+                console.print(missed)
+
+        console.print(
+            f"\n[bold]Totals:[/bold] "
+            f"[green]{listed} listed[/green], "
+            f"[yellow]{skipped} skipped[/yellow], "
+            f"[red]{failed} failed[/red]"
+        )
         try:
             db.close()
         except Exception:

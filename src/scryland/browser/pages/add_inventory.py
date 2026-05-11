@@ -21,9 +21,22 @@ class AddInventoryPage:
         self._page = page
         self._config = config
 
-    async def search_for_card(self, card: MythicCard) -> None:
-        """Search the product catalog for a specific card."""
-        logger.info("Searching for '%s' from '%s'", card.card_name, card.set_name)
+    async def search_for_card(self, card: MythicCard, apply_set_filter: bool = True) -> None:
+        """Search the product catalog for a specific card.
+
+        When `apply_set_filter` is False, the set dropdown is left at its
+        default (typically "All Sets"). Used as a fallback by callers when
+        the strict set-filtered search returned 0 results — Mythic Tools
+        set names occasionally don't line up with TCG's dropdown labels
+        (e.g. promo sets, special-edition variants), so a name-only search
+        within Magic gives the row-level matcher a chance to use collector #.
+        """
+        logger.info(
+            "Searching for '%s' from '%s'%s",
+            card.card_name,
+            card.set_name,
+            "" if apply_set_filter else " [no set filter]",
+        )
 
         # Always navigate to the catalog page fresh. Prior in-flight
         # navigations (e.g. a previous save redirect) can abort this one —
@@ -88,8 +101,24 @@ class AddInventoryPage:
         # Mythic Tools names don't always match TCG's exactly — e.g. TCG has
         # "Secrets of Strixhaven: Mystical Archive" vs Mythic "Secrets of
         # Strixhaven Mystical Archive".
+        if not apply_set_filter:
+            logger.debug("Skipping set filter (caller requested name-only search)")
         try:
-            selected_set = await self._page.evaluate(
+            if not apply_set_filter:
+                # Reset the set dropdown to "All Sets" — leftover state from
+                # a previous search would otherwise restrict our retry to the
+                # wrong set and reproduce the same 0-results failure.
+                await self._page.evaluate(
+                    """() => {
+                        const sel = document.querySelector('#SetNameId');
+                        if (!sel || sel.options.length === 0) return;
+                        sel.value = sel.options[0].value;
+                        sel.dispatchEvent(new Event('change', { bubbles: true }));
+                    }"""
+                )
+                selected_set = None
+            else:
+                selected_set = await self._page.evaluate(
                 """(targetSet) => {
                 const sel = document.querySelector('#SetNameId');
                 if (!sel) return null;
@@ -327,6 +356,7 @@ class AddInventoryPage:
         logger.debug("Found %d data rows in search results", len(row_data))
 
         all_matches: list[dict] = []  # row data dicts with added 'score'
+        target_num = card.collector_number.lstrip("0") if card.collector_number else ""
         for r in row_data:
             name = r["name"]
             set_name = r["setName"]
@@ -335,16 +365,25 @@ class AddInventoryPage:
 
             logger.debug("Row: name='%s', set='%s', number='%s'", name, set_name, number)
 
+            # Highest-priority check: set + collector # column alone is
+            # decisive. Name fuzzy-matching often misses when TCG decorates
+            # the name differently than Mythic Tools ("(Borderless)",
+            # "(Showcase)", reordered DFC faces), but the Number column is
+            # stable. If set matches and #s match, trust it and skip the
+            # name-based fallback entirely.
+            if (
+                target_num
+                and number_clean
+                and number_clean == target_num
+                and self._set_matches(set_name, card)
+            ):
+                logger.debug("Collector # + set match: '%s' #%s", name, number)
+                all_matches.append({**r, "score": 3})
+                continue
+
             matches, score = self._matches_card(name, set_name, card)
             if not (matches and score > 0):
                 continue
-            if (
-                card.collector_number
-                and number_clean
-                and number_clean == card.collector_number.lstrip("0")
-            ):
-                score = 3
-                logger.debug("Collector # match via Number column: '%s'", number)
             all_matches.append({**r, "score": score})
 
         if all_matches:
@@ -417,6 +456,28 @@ class AddInventoryPage:
         )
         return False, 0
 
+    def _set_matches(self, tcg_set: str, card: MythicCard) -> bool:
+        """Flexible set-name match between Mythic Tools and TCGPlayer.
+
+        Mythic Tools and TCGPlayer name sets differently (e.g., "Teenage
+        Mutant Ninja Turtles Eternal" vs "Commander: Teenage Mutant Ninja
+        Turtles") so we accept exact, substring (either direction), or 2+
+        shared significant-word overlap.
+        """
+        tcg_set_lower = tcg_set.lower().strip()
+        card_set_lower = card.set_name.lower().strip()
+
+        if (
+            tcg_set_lower == card_set_lower
+            or card_set_lower in tcg_set_lower
+            or tcg_set_lower in card_set_lower
+        ):
+            return True
+
+        tcg_words = {w for w in tcg_set_lower.split() if len(w) >= 3}
+        card_words = {w for w in card_set_lower.split() if len(w) >= 3}
+        return len(tcg_words & card_words) >= 2
+
     def _matches_card(self, tcg_name: str, tcg_set: str, card: MythicCard) -> tuple[bool, int]:
         """Check if a TCGPlayer catalog row matches a Mythic Tools card.
 
@@ -427,28 +488,10 @@ class AddInventoryPage:
         - 0: no match
         """
         tcg_name_lower = tcg_name.lower().strip()
-        tcg_set_lower = tcg_set.lower().strip()
         card_name_lower = card.card_name.lower().strip()
-        card_set_lower = card.set_name.lower().strip()
         front_face = card_name_lower.split("//")[0].strip()
 
-        # Set must match — use flexible matching since Mythic Tools and TCGPlayer
-        # name sets differently (e.g., "Teenage Mutant Ninja Turtles Eternal" vs
-        # "Commander: Teenage Mutant Ninja Turtles")
-        set_match = (
-            tcg_set_lower == card_set_lower
-            or card_set_lower in tcg_set_lower
-            or tcg_set_lower in card_set_lower
-        )
-        # Fallback: check if they share significant words (3+ chars)
-        if not set_match:
-            tcg_words = {w for w in tcg_set_lower.split() if len(w) >= 3}
-            card_words = {w for w in card_set_lower.split() if len(w) >= 3}
-            common = tcg_words & card_words
-            # If they share 2+ significant words, consider it a match
-            set_match = len(common) >= 2
-
-        if not set_match:
+        if not self._set_matches(tcg_set, card):
             return False, 0
 
         # Best: exact collector number in TCGPlayer name like "(2376)"
@@ -656,8 +699,14 @@ class AddInventoryPage:
         if card.is_foil:
             target_condition += " Foil"
 
-        result = await self._page.evaluate(
-            """(targetCond) => {
+        # Wrapped in retry_on_flaky because the caller often invokes this
+        # immediately after clicking Add, which navigates to the manage
+        # page — Playwright's networkidle wait can return before the new
+        # context is installed, and the evaluate then dies with
+        # "Execution context was destroyed".
+        result = await retry_on_flaky(
+            lambda: self._page.evaluate(
+                """(targetCond) => {
             const tables = document.querySelectorAll('table');
             for (const table of tables) {
                 const header = table.innerText.substring(0, 200);
@@ -682,7 +731,10 @@ class AddInventoryPage:
             }
             return false;
         }""",
-            target_condition,
+                target_condition,
+            ),
+            page=self._page,
+            label="is_already_listed evaluate",
         )
 
         return result or False
@@ -696,8 +748,12 @@ class AddInventoryPage:
         if card.is_foil:
             target_condition += " Foil"
 
-        result = await self._page.evaluate(
-            """(targetCond) => {
+        # See is_already_listed: this runs right after click-Add navigation,
+        # so the evaluate races the new manage page's context being
+        # installed. retry_on_flaky settles the page and re-runs.
+        result = await retry_on_flaky(
+            lambda: self._page.evaluate(
+                """(targetCond) => {
             const tables = document.querySelectorAll('table');
             for (const table of tables) {
                 const header = table.innerText.substring(0, 200);
@@ -714,7 +770,10 @@ class AddInventoryPage:
             }
             return null;
         }""",
-            target_condition,
+                target_condition,
+            ),
+            page=self._page,
+            label="get_tcg_lowest_price evaluate",
         )
 
         return result
