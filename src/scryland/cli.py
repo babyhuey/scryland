@@ -1252,7 +1252,7 @@ def optimize(ctx: click.Context, dry_run: bool, volatile: bool, delist_below: fl
                                 console.print("    [red]Save failed — delist(s) not applied[/red]")
 
                     await session.human_delay()
-                    await inventory_page.go_back_to_inventory(reapply_filter=False)
+                    await inventory_page.go_back_to_inventory(reapply_filter=True)
                 except Exception:
                     logger.warning(
                         "Could not scrape '%s' for DB sync — product skipped "
@@ -1634,7 +1634,7 @@ def status(ctx: click.Context, refresh: bool) -> None:
                         listings = await inventory_page.get_manage_page_listings(product["name"])
                         all_listings.extend(listings)
                         await session.human_delay()
-                        await inventory_page.go_back_to_inventory(reapply_filter=False)
+                        await inventory_page.go_back_to_inventory(reapply_filter=True)
                     except Exception:
                         logger.debug("Could not scrape '%s'", product["name"])
 
@@ -1793,7 +1793,11 @@ async def _scrape_tcg_inventory(session, config, db, logger) -> None:
             logger.debug("Failed to scrape '%s'", product_name, exc_info=True)
 
         await session.human_delay()
-        await inventory_page.go_back_to_inventory(reapply_filter=False)
+        # reapply_filter=True is required: TCG drops 'My Inventory Only'
+        # across the manage→Back-to-Inventory redirect. Without this,
+        # iterations 2+ paginate the global catalog instead of the user's
+        # listings — same gotcha already documented in _tcg_floor_sweep.
+        await inventory_page.go_back_to_inventory(reapply_filter=True)
 
     console.print(f"\nSyncing {len(all_listings)} listings to database...")
     report = db.sync(all_listings)
