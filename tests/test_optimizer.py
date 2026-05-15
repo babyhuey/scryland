@@ -223,3 +223,66 @@ class TestZeroCurrentPrice:
 
         # Goes through as a small/normal change (pct=0) and applies.
         assert result.updated == 1
+
+
+class TestDbPriceUpdate:
+    async def test_updates_db_after_successful_match(self, config, console, monkeypatch):
+        """After a successful match, update_tcg_price is called with the new price."""
+        _patch_pages(
+            monkeypatch,
+            differentials=[
+                {
+                    "product_name": "Card A",
+                    "condition": "Near Mint",
+                    "marketplace_price": 2.00,
+                    "lowest_listing": 1.90,  # -5%, under the 10% guardrail threshold
+                }
+            ],
+        )
+        session = _session_mock()
+        db = MagicMock()
+
+        result = await run_price_differential_optimize(session, config, console, db=db)
+
+        assert result.updated == 1
+        db.update_tcg_price.assert_called_once_with("Card A", "Near Mint", 1.90)
+
+    async def test_no_db_update_on_delist(self, config, console, monkeypatch):
+        """Delist (lowest <= 0.01) does not call update_tcg_price."""
+        _patch_pages(
+            monkeypatch,
+            differentials=[
+                {
+                    "product_name": "Cheap Card",
+                    "condition": "Near Mint",
+                    "marketplace_price": 0.50,
+                    "lowest_listing": 0.01,
+                }
+            ],
+        )
+        session = _session_mock()
+        db = MagicMock()
+
+        result = await run_price_differential_optimize(session, config, console, db=db)
+
+        assert result.delisted == 1
+        db.update_tcg_price.assert_not_called()
+
+    async def test_no_db_kwarg_still_works(self, config, console, monkeypatch):
+        """Omitting db= keeps existing behavior — no crash."""
+        _patch_pages(
+            monkeypatch,
+            differentials=[
+                {
+                    "product_name": "Card A",
+                    "condition": "Near Mint",
+                    "marketplace_price": 1.00,
+                    "lowest_listing": 1.50,
+                }
+            ],
+        )
+        session = _session_mock()
+
+        result = await run_price_differential_optimize(session, config, console)
+
+        assert result.updated == 1

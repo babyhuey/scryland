@@ -34,6 +34,7 @@ async def run_price_differential_optimize(
     session: BrowserSession,
     config: ScrylandConfig,
     console: Console,
+    db=None,
 ) -> OptimizeResult:
     """Run one pass of the price differential optimize flow."""
     result = OptimizeResult()
@@ -156,6 +157,8 @@ async def run_price_differential_optimize(
                 console.print("    [green]Updated![/green]")
                 result.updated += 1
                 result.total_change += change
+                if db is not None:
+                    db.update_tcg_price(name, diff["condition"], float(lowest))
 
         await report_page.go_back_to_report()
 
