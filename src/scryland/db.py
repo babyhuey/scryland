@@ -93,6 +93,11 @@ CREATE TABLE IF NOT EXISTS ebay_listings (
 
 CREATE INDEX IF NOT EXISTS idx_ebay_canonical
     ON ebay_listings(canonical_key);
+
+CREATE TABLE IF NOT EXISTS metadata (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 
@@ -965,6 +970,29 @@ class InventoryDB:
             (status, now, sku),
         )
         self.conn.commit()
+
+    def get_metadata(self, key: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT value FROM metadata WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+    def set_metadata(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO metadata(key, value) VALUES(?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self.conn.commit()
+
+    def update_tcg_price(self, product_name: str, condition: str, price: float) -> int:
+        cur = self.conn.execute(
+            "UPDATE inventory SET current_price = ?"
+            " WHERE product_name = ? AND condition = ? AND status = 'active'",
+            (price, product_name, condition),
+        )
+        self.conn.commit()
+        return cur.rowcount
 
     def find_inventory_by_canonical(self, key: str) -> dict | None:
         """Return the active inventory row whose canonical key matches.
