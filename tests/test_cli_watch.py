@@ -191,3 +191,48 @@ class TestWatchEbayOnlySweeps:
         monkeypatch.setattr(_aio, "sleep", fake)
         result = runner.invoke(cli, ["watch", "--ebay-only", "-i", "9999"])
         assert result.exit_code in (0, 1)
+
+
+class TestPeriodicTcgRefresh:
+    """Periodic TCG scrape fires when last_tcg_scrape timestamp is overdue."""
+
+    def _make_db(self, tmp_path):
+        db = InventoryDB(tmp_path / "t.db")
+        db.open()
+        return db
+
+    def test_get_metadata_none_when_unset(self, tmp_path):
+        db = self._make_db(tmp_path)
+        assert db.get_metadata("last_tcg_scrape") is None
+        db.close()
+
+    def test_set_metadata_persists_across_open(self, tmp_path):
+        db = self._make_db(tmp_path)
+        db.set_metadata("last_tcg_scrape", "2020-01-01T00:00:00")
+        db.close()
+        db2 = InventoryDB(tmp_path / "t.db")
+        db2.open()
+        assert db2.get_metadata("last_tcg_scrape") == "2020-01-01T00:00:00"
+        db2.close()
+
+    def test_overdue_when_no_timestamp(self, tmp_path):
+        """No stored timestamp → refresh is overdue."""
+        from datetime import datetime
+        db = self._make_db(tmp_path)
+        last_str = db.get_metadata("last_tcg_scrape")
+        last_dt = datetime.fromisoformat(last_str) if last_str else None
+        overdue = last_dt is None or (datetime.now() - last_dt).total_seconds() > 3 * 86400
+        assert overdue is True
+        db.close()
+
+    def test_not_overdue_when_recent(self, tmp_path):
+        """Timestamp from 1 day ago → not overdue for 3-day interval."""
+        from datetime import datetime, timedelta
+        db = self._make_db(tmp_path)
+        recent = (datetime.now() - timedelta(days=1)).isoformat()
+        db.set_metadata("last_tcg_scrape", recent)
+        last_str = db.get_metadata("last_tcg_scrape")
+        last_dt = datetime.fromisoformat(last_str) if last_str else None
+        overdue = last_dt is None or (datetime.now() - last_dt).total_seconds() > 3 * 86400
+        assert overdue is False
+        db.close()
