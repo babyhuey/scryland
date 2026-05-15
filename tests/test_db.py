@@ -286,7 +286,9 @@ class TestMetadata:
 
 class TestUpdateTcgPrice:
     def test_updates_matching_active_row(self, db):
-        db.upsert_listing(_make_listing(product_name="Bolt", condition="Near Mint", current_price=Decimal("2.00")))
+        db.upsert_listing(
+            _make_listing(product_name="Bolt", condition="Near Mint", current_price=Decimal("2.00"))
+        )
         rows = db.update_tcg_price("Bolt", "Near Mint", 1.50)
         assert rows == 1
         row = db.conn.execute(
@@ -298,7 +300,9 @@ class TestUpdateTcgPrice:
         assert db.update_tcg_price("Ghost Card", "Near Mint", 1.00) == 0
 
     def test_does_not_touch_inactive_rows(self, db):
-        db.upsert_listing(_make_listing(product_name="Sold", condition="Near Mint", current_price=Decimal("2.00")))
+        db.upsert_listing(
+            _make_listing(product_name="Sold", condition="Near Mint", current_price=Decimal("2.00"))
+        )
         db.conn.execute("UPDATE inventory SET status='inactive' WHERE product_name='Sold'")
         db.conn.commit()
         rows = db.update_tcg_price("Sold", "Near Mint", 0.50)
