@@ -972,9 +972,7 @@ class InventoryDB:
         self.conn.commit()
 
     def get_metadata(self, key: str) -> str | None:
-        row = self.conn.execute(
-            "SELECT value FROM metadata WHERE key = ?", (key,)
-        ).fetchone()
+        row = self.conn.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else None
 
     def set_metadata(self, key: str, value: str) -> None:

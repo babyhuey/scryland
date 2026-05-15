@@ -218,6 +218,7 @@ class TestPeriodicTcgRefresh:
     def test_overdue_when_no_timestamp(self, tmp_path):
         """No stored timestamp → refresh is overdue."""
         from datetime import datetime
+
         db = self._make_db(tmp_path)
         last_str = db.get_metadata("last_tcg_scrape")
         last_dt = datetime.fromisoformat(last_str) if last_str else None
@@ -228,6 +229,7 @@ class TestPeriodicTcgRefresh:
     def test_not_overdue_when_recent(self, tmp_path):
         """Timestamp from 1 day ago → not overdue for 3-day interval."""
         from datetime import datetime, timedelta
+
         db = self._make_db(tmp_path)
         recent = (datetime.now() - timedelta(days=1)).isoformat()
         db.set_metadata("last_tcg_scrape", recent)

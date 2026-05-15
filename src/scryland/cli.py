@@ -2630,11 +2630,14 @@ def watch(
                         # fresh for the eBay uncompetitive-gap delist check.
                         if tcg_refresh_days > 0:
                             from datetime import datetime
+
                             last_str = db.get_metadata("last_tcg_scrape")
                             last_dt = datetime.fromisoformat(last_str) if last_str else None
-                            overdue = last_dt is None or (
-                                datetime.now() - last_dt
-                            ).total_seconds() > tcg_refresh_days * 86400
+                            overdue = (
+                                last_dt is None
+                                or (datetime.now() - last_dt).total_seconds()
+                                > tcg_refresh_days * 86400
+                            )
                             if overdue:
                                 console.print(
                                     f"\n[bold]TCG inventory refresh[/bold]"
@@ -2649,7 +2652,9 @@ def watch(
                                         "[yellow]TCG inventory refresh failed — continuing[/yellow]"
                                     )
 
-                        opt_result = await run_price_differential_optimize(session, config, console, db=db)
+                        opt_result = await run_price_differential_optimize(
+                            session, config, console, db=db
+                        )
                     total_change = opt_result.total_change
                     if opt_result.total:
                         direction = "[green]up[/green]" if total_change > 0 else "[red]down[/red]"
