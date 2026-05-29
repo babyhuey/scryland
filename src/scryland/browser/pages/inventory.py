@@ -123,17 +123,15 @@ class InventoryPage:
         attempts = 3
         last_state: tuple[int, int] | None = None
         for attempt in range(1, attempts + 1):
-            checkbox = await self._page.query_selector("input[type='checkbox']")
-            if checkbox is not None:
+            checkbox_label = self._page.locator("text=My Inventory Only")
+            if await checkbox_label.count() > 0:
                 try:
-                    is_checked = await checkbox.is_checked()
+                    is_checked = await checkbox_label.is_checked()
                 except Exception:
                     is_checked = False
                 if not is_checked:
-                    checkbox_label = self._page.locator("text=My Inventory Only")
-                    if await checkbox_label.count() > 0:
-                        await checkbox_label.click()
-                        await self._page.wait_for_timeout(500)
+                    await checkbox_label.click()
+                    await self._page.wait_for_timeout(500)
 
             search_btn = self._page.locator(Selectors.SEARCH_BUTTON)
             await search_btn.click()
