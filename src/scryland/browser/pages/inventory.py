@@ -85,31 +85,104 @@ class InventoryPage:
 
         logger.info("Inventory page loaded")
 
+    async def _count_manage_and_add(self) -> tuple[int, int]:
+        """Count Manage vs Add buttons on the current inventory page.
+
+        Manage = a row in the user's inventory. Add = a catalog row the
+        user does not own. Used to verify the My Inventory Only filter
+        actually applied — an Add count > 0 means the filter is OFF and
+        the page is showing the global catalog.
+        """
+        return await self._page.evaluate(
+            """() => {
+                let m = 0, a = 0;
+                for (const el of document.querySelectorAll('a, button, input')) {
+                    const t = (el.textContent || el.value || '').trim();
+                    if (t === 'Manage') m += 1;
+                    else if (t === 'Add') a += 1;
+                }
+                return [m, a];
+            }"""
+        )
+
     async def _apply_my_inventory_filter(self) -> None:
-        """Ensure 'My Inventory Only' is checked and click Search."""
-        try:
-            # Find the actual checkbox input (not the label)
+        """Ensure 'My Inventory Only' is applied. Verifies the post-state.
+
+        Silent filter failures are catastrophic for callers like the
+        floor sweep: the page falls back to the global TCGPlayer catalog
+        (~25 Add rows per page across thousands of pages), pagination
+        scans products the user doesn't own, and click_manage_for_product
+        raises SelectorNotFoundError for products that ARE in the user's
+        inventory. We verify by comparing Manage (user-owned) vs Add
+        (catalog-only) row counts: filtered pages are dominated by
+        Manage rows; unfiltered ones are dominated by Add rows. A few
+        Add rows can legitimately appear on a filtered page (e.g. a
+        product just delisted by setting qty=0 in this same loop), so
+        the threshold is `add < manage`, not `add == 0`.
+        """
+        attempts = 3
+        last_state: tuple[int, int] | None = None
+        for attempt in range(1, attempts + 1):
             checkbox = await self._page.query_selector("input[type='checkbox']")
-            if checkbox:
-                is_checked = await checkbox.is_checked()
+            if checkbox is not None:
+                try:
+                    is_checked = await checkbox.is_checked()
+                except Exception:
+                    is_checked = False
                 if not is_checked:
-                    # Click the label to check it
                     checkbox_label = self._page.locator("text=My Inventory Only")
                     if await checkbox_label.count() > 0:
                         await checkbox_label.click()
-                        logger.debug("Checked 'My Inventory Only'")
                         await self._page.wait_for_timeout(500)
-                else:
-                    logger.debug("'My Inventory Only' already checked")
 
             search_btn = self._page.locator(Selectors.SEARCH_BUTTON)
             await search_btn.click()
-            await self._page.wait_for_load_state("networkidle")
-            # Wait for table to re-render with filtered results
+            try:
+                await self._page.wait_for_load_state("networkidle", timeout=15_000)
+            except Exception:
+                logger.debug("networkidle wait timed out after Search click")
             await self._page.wait_for_timeout(1000)
-            logger.info("Filtered to 'My Inventory Only'")
-        except Exception:
-            logger.warning("Could not apply 'My Inventory Only' filter", exc_info=True)
+
+            manage, add = await self._count_manage_and_add()
+            last_state = (manage, add)
+            if manage > 0 and add < manage:
+                logger.info(
+                    "Filtered to 'My Inventory Only' (attempt %d, %d listings, %d add)",
+                    attempt,
+                    manage,
+                    add,
+                )
+                return
+
+            logger.warning(
+                "My Inventory Only filter did not apply on attempt %d "
+                "(Manage=%d, Add=%d) — re-navigating and retrying",
+                attempt,
+                manage,
+                add,
+            )
+            # Hard reload before retry: some sticky page state seems to
+            # persist across just-the-Search-click attempts. A full
+            # reload of inventory_url is the cheapest reliable reset.
+            try:
+                await self._page.goto(
+                    self._config.inventory_url,
+                    wait_until="networkidle",
+                )
+                await self._page.wait_for_selector(
+                    Selectors.CATALOG_TABLE,
+                    timeout=self._config.browser_timeout_ms,
+                )
+            except Exception:
+                logger.debug("Reload during filter retry failed", exc_info=True)
+
+        manage, add = last_state if last_state is not None else (0, 0)
+        raise NavigationError(
+            "My Inventory Only filter could not be applied after "
+            f"{attempts} attempts (Manage={manage}, Add={add}). "
+            "Refusing to proceed — pagination would scan the global "
+            "catalog and miss the user's listings."
+        )
 
     async def get_product_names(self) -> list[dict[str, str]]:
         """Get product names for rows with a Manage button, across all pages.
