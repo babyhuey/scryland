@@ -29,14 +29,14 @@ class PricingPage:
         import asyncio
 
         deadline = poll_ms / 1000.0
-        start = asyncio.get_event_loop().time()
+        start = asyncio.get_running_loop().time()
         while True:
             all_tables = await self._page.query_selector_all("table")
             for table in all_tables:
                 header_text = await table.evaluate("el => el.innerText.substring(0, 200)")
                 if "Condition" in header_text and "TCG" in header_text:
                     return table
-            if asyncio.get_event_loop().time() - start >= deadline:
+            if asyncio.get_running_loop().time() - start >= deadline:
                 return None
             await asyncio.sleep(0.25)
 
