@@ -313,6 +313,50 @@ class TestUpdateTcgPrice:
         assert row["current_price"] == pytest.approx(2.00)
 
 
+class TestInsertSaleRowMarketplaceDedup:
+    def test_same_order_different_marketplace_both_recorded(self, db):
+        """TCG and eBay sales for the same order/card must both be stored."""
+        tcg_sale = {
+            "order_number": "ORD-001",
+            "product_name": "Lightning Bolt",
+            "condition": "Near Mint",
+            "_marketplace": "tcgplayer",
+        }
+        ebay_sale = {
+            "order_number": "ORD-001",
+            "product_name": "Lightning Bolt",
+            "condition": "Near Mint",
+            "_marketplace": "ebay",
+        }
+        n1 = db.record_order_sales([tcg_sale])
+        n2 = db.record_order_sales([ebay_sale])
+        assert n1 == 1
+        assert n2 == 1
+        rows = db.conn.execute("SELECT marketplace FROM sales ORDER BY id").fetchall()
+        assert [r["marketplace"] for r in rows] == ["tcgplayer", "ebay"]
+
+    def test_same_marketplace_duplicate_not_double_inserted(self, db):
+        """Running twice for the same sale returns 0 on the second call."""
+        sale = {"order_number": "ORD-002", "product_name": "Bolt", "condition": "NM", "_marketplace": "tcgplayer"}
+        assert db.record_order_sales([sale]) == 1
+        assert db.record_order_sales([sale]) == 0
+
+
+class TestRecordSaleMarketplace:
+    def test_record_sale_preserves_marketplace(self, db):
+        """record_sale must store the _marketplace key from the sale dict."""
+        sale = {
+            "order_number": "ORD-003",
+            "product_name": "Bolt",
+            "condition": "NM",
+            "_marketplace": "ebay",
+        }
+        result = db.record_sale(sale)
+        assert result is True
+        row = db.conn.execute("SELECT marketplace FROM sales WHERE order_number = 'ORD-003'").fetchone()
+        assert row["marketplace"] == "ebay"
+
+
 class TestNullConditionGuard:
     def test_find_inventory_by_canonical_tolerates_null_condition(self, db):
         """find_inventory_by_canonical must not crash when condition is NULL."""
