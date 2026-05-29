@@ -14,6 +14,7 @@ venv/
 # Encrypted credentials (never commit)
 .scryland_credentials
 .scryland_ebay_credentials
+.scryland_ebay_credentials.salt
 .scryland_salt
 
 # Inventory database
