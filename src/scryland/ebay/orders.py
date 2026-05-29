@@ -115,7 +115,8 @@ def order_to_sales_rows(order: dict) -> list[dict]:
     fees_total = _dollars(pricing.get("totalMarketplaceFee"))
     shipping_total = _dollars(pricing.get("deliveryCost"))
 
-    line_items = order.get("lineItems") or []
+    raw_items = order.get("lineItems") or []
+    line_items = [raw_items] if isinstance(raw_items, dict) else list(raw_items)
     # Compute price-weighted share for each line item. Fall back to
     # even split when all line items are $0 (degenerate case).
     line_prices = [_dollars(li.get("lineItemCost")) for li in line_items]
