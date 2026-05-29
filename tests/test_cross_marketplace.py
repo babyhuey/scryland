@@ -341,6 +341,7 @@ class TestCrossLookup:
 # (order already recorded on a prior run).
 # ---------------------------------------------------------------------------
 
+
 def _make_order(sku: str = "TEST-SKU") -> dict:
     """Minimal eBay order dict with one line item."""
     return {

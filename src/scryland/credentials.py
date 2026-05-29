@@ -28,7 +28,7 @@ _CREDENTIALS_FILE = ".scryland_credentials"
 _SALT_FILE = ".scryland_salt"
 
 
-def _resolve(filename: str, base_dir: "Path | None") -> "Path":
+def _resolve(filename: str, base_dir: Path | None) -> Path:
     if base_dir is not None:
         return base_dir / filename
     return Path(filename)
@@ -46,7 +46,7 @@ def _derive_key(passphrase: str, salt: bytes) -> bytes:
 
 
 def save_credentials(
-    username: str, password: str, passphrase: str, *, base_dir: "Path | None" = None
+    username: str, password: str, passphrase: str, *, base_dir: Path | None = None
 ) -> None:
     """Encrypt and save credentials to disk."""
     import os
@@ -71,9 +71,7 @@ def save_credentials(
     logger.info("Credentials saved (encrypted)")
 
 
-def load_credentials(
-    passphrase: str, *, base_dir: "Path | None" = None
-) -> tuple[str, str] | None:
+def load_credentials(passphrase: str, *, base_dir: Path | None = None) -> tuple[str, str] | None:
     """Load and decrypt credentials from disk.
 
     Returns (username, password) or None if credentials don't exist or
@@ -101,14 +99,14 @@ def load_credentials(
         return None
 
 
-def credentials_exist(*, base_dir: "Path | None" = None) -> bool:
+def credentials_exist(*, base_dir: Path | None = None) -> bool:
     """Check if encrypted credentials are stored."""
-    return _resolve(_CREDENTIALS_FILE, base_dir).exists() and _resolve(
-        _SALT_FILE, base_dir
-    ).exists()
+    return (
+        _resolve(_CREDENTIALS_FILE, base_dir).exists() and _resolve(_SALT_FILE, base_dir).exists()
+    )
 
 
-def clear_credentials(*, base_dir: "Path | None" = None) -> None:
+def clear_credentials(*, base_dir: Path | None = None) -> None:
     """Delete stored credentials."""
     for path in [_resolve(_CREDENTIALS_FILE, base_dir), _resolve(_SALT_FILE, base_dir)]:
         if path.exists():

@@ -605,7 +605,10 @@ class InventoryDB:
                 elif old:
                     old_price = old["current_price"]
                     old_qty = old["quantity"]
-                    if old_price is not None and abs(old_price - float(listing.current_price)) > 0.001:
+                    if (
+                        old_price is not None
+                        and abs(old_price - float(listing.current_price)) > 0.001
+                    ):
                         price_changed.append(
                             {
                                 "name": f"{listing.product_name} ({listing.condition})",

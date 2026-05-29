@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from scryland.db import InventoryDB, _escape_like
+from scryland.db import InventoryDB
 from scryland.models import Listing
 
 
@@ -337,7 +337,12 @@ class TestInsertSaleRowMarketplaceDedup:
 
     def test_same_marketplace_duplicate_not_double_inserted(self, db):
         """Running twice for the same sale returns 0 on the second call."""
-        sale = {"order_number": "ORD-002", "product_name": "Bolt", "condition": "NM", "_marketplace": "tcgplayer"}
+        sale = {
+            "order_number": "ORD-002",
+            "product_name": "Bolt",
+            "condition": "NM",
+            "_marketplace": "tcgplayer",
+        }
         assert db.record_order_sales([sale]) == 1
         assert db.record_order_sales([sale]) == 0
 
@@ -353,7 +358,9 @@ class TestRecordSaleMarketplace:
         }
         result = db.record_sale(sale)
         assert result is True
-        row = db.conn.execute("SELECT marketplace FROM sales WHERE order_number = 'ORD-003'").fetchone()
+        row = db.conn.execute(
+            "SELECT marketplace FROM sales WHERE order_number = 'ORD-003'"
+        ).fetchone()
         assert row["marketplace"] == "ebay"
 
 
@@ -375,12 +382,16 @@ class TestNullConditionGuard:
 class TestFalsyZeroPriceTracking:
     def test_upsert_listing_records_change_from_zero(self, db):
         """A listing with price 0.0 that gets repriced should set last_price_change."""
-        listing = _make_listing(product_name="Bolt", condition="Near Mint", current_price=Decimal("0.00"))
+        listing = _make_listing(
+            product_name="Bolt", condition="Near Mint", current_price=Decimal("0.00")
+        )
         db.upsert_listing(listing, "")
         db.conn.execute("UPDATE inventory SET current_price = 0.0 WHERE product_name = 'Bolt'")
         db.conn.commit()
 
-        repriced = _make_listing(product_name="Bolt", condition="Near Mint", current_price=Decimal("1.50"))
+        repriced = _make_listing(
+            product_name="Bolt", condition="Near Mint", current_price=Decimal("1.50")
+        )
         db.upsert_listing(repriced, "")
 
         row = db.conn.execute(
@@ -390,12 +401,18 @@ class TestFalsyZeroPriceTracking:
 
     def test_sync_counts_change_from_zero(self, db):
         """sync() must count a $0→$X reprice in price_changed."""
-        listing = _make_listing(product_name="Bolt", condition="Near Mint", current_price=Decimal("0.00"))
+        listing = _make_listing(
+            product_name="Bolt", condition="Near Mint", current_price=Decimal("0.00")
+        )
         db.upsert_listing(listing, "")
-        db.conn.execute("UPDATE inventory SET current_price = 0.0, status = 'active' WHERE product_name = 'Bolt'")
+        db.conn.execute(
+            "UPDATE inventory SET current_price = 0.0, status = 'active' WHERE product_name = 'Bolt'"
+        )
         db.conn.commit()
 
-        repriced = _make_listing(product_name="Bolt", condition="Near Mint", current_price=Decimal("1.50"))
+        repriced = _make_listing(
+            product_name="Bolt", condition="Near Mint", current_price=Decimal("1.50")
+        )
         report = db.sync([repriced])
         assert len(report.price_changed) == 1
         assert report.price_changed[0]["old_price"] == pytest.approx(0.0)
@@ -406,7 +423,11 @@ class TestIsListedFuzzyLikeEscape:
     def test_underscore_in_name_does_not_match_wildcard(self, db):
         """A card name with _ should not match a card with a different character there."""
         db.upsert_listing(
-            _make_listing(product_name="Vessel of Nascency", condition="Near Mint", current_price=Decimal("0.50")),
+            _make_listing(
+                product_name="Vessel of Nascency",
+                condition="Near Mint",
+                current_price=Decimal("0.50"),
+            ),
             "",
         )
         assert not db.is_listed_fuzzy("Vessel_of_Nascency", "Near Mint", "")
@@ -414,7 +435,9 @@ class TestIsListedFuzzyLikeEscape:
     def test_percent_in_name_does_not_expand(self, db):
         """A card name with % should not match anything-goes wildcard expansion."""
         db.upsert_listing(
-            _make_listing(product_name="Some Card", condition="Near Mint", current_price=Decimal("1.00")),
+            _make_listing(
+                product_name="Some Card", condition="Near Mint", current_price=Decimal("1.00")
+            ),
             "",
         )
         assert not db.is_listed_fuzzy("Some%", "Near Mint", "")
@@ -423,7 +446,9 @@ class TestIsListedFuzzyLikeEscape:
 class TestSyncTransactionSafety:
     def test_sync_rolls_back_on_upsert_failure(self, db, monkeypatch):
         """If sync() raises mid-loop, inventory rows must remain 'active', not stuck in 'checking'."""
-        listing = _make_listing(product_name="Bolt", condition="Near Mint", current_price=Decimal("1.00"))
+        listing = _make_listing(
+            product_name="Bolt", condition="Near Mint", current_price=Decimal("1.00")
+        )
         db.upsert_listing(listing, "")
         db.conn.commit()
 
@@ -435,7 +460,5 @@ class TestSyncTransactionSafety:
         with pytest.raises(RuntimeError):
             db.sync([listing])
 
-        row = db.conn.execute(
-            "SELECT status FROM inventory WHERE product_name = 'Bolt'"
-        ).fetchone()
+        row = db.conn.execute("SELECT status FROM inventory WHERE product_name = 'Bolt'").fetchone()
         assert row["status"] == "active"
