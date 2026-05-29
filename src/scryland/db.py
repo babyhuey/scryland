@@ -574,80 +574,89 @@ class InventoryDB:
         price_changed: list[dict] = []
         quantity_changed: list[dict] = []
 
-        # Record price history for all listings
+        # Record price history for all listings (separate operation, not rolled back with sync)
         self.record_prices(current_listings)
 
-        # Step 1: Mark all active as 'checking'
-        self.conn.execute("UPDATE inventory SET status = 'checking' WHERE status = 'active'")
+        try:
+            self.conn.execute("SAVEPOINT sync")
 
-        # Step 2: Upsert each listing
-        for listing in current_listings:
-            # Detect finish from condition name (e.g., "Near Mint Foil")
-            finish = ""
-            condition = listing.condition
-            if "Foil" in condition:
-                finish = "Foil"
+            # Step 1: Mark all active as 'checking'
+            self.conn.execute("UPDATE inventory SET status = 'checking' WHERE status = 'active'")
 
-            # Check old values before upserting
-            old = self.conn.execute(
-                "SELECT current_price, quantity FROM inventory "
-                "WHERE product_name = ? AND condition = ? AND finish = ?",
-                (listing.product_name, listing.condition, finish),
-            ).fetchone()
+            # Step 2: Upsert each listing
+            for listing in current_listings:
+                # Detect finish from condition name (e.g., "Near Mint Foil")
+                finish = ""
+                condition = listing.condition
+                if "Foil" in condition:
+                    finish = "Foil"
 
-            is_new = self.upsert_listing(listing, finish)
+                # Check old values before upserting
+                old = self.conn.execute(
+                    "SELECT current_price, quantity FROM inventory "
+                    "WHERE product_name = ? AND condition = ? AND finish = ?",
+                    (listing.product_name, listing.condition, finish),
+                ).fetchone()
 
-            if is_new:
-                added.append(f"{listing.product_name} ({listing.condition})")
-            elif old:
-                old_price = old["current_price"]
-                old_qty = old["quantity"]
-                if old_price is not None and abs(old_price - float(listing.current_price)) > 0.001:
-                    price_changed.append(
-                        {
-                            "name": f"{listing.product_name} ({listing.condition})",
-                            "old_price": old_price,
-                            "new_price": float(listing.current_price),
-                        }
-                    )
-                if old_qty != listing.quantity:
-                    quantity_changed.append(
-                        {
-                            "name": f"{listing.product_name} ({listing.condition})",
-                            "old_qty": old_qty,
-                            "new_qty": listing.quantity,
-                        }
-                    )
+                is_new = self.upsert_listing(listing, finish)
 
-        # Step 3: Any still 'checking' → removed
-        still_checking = self.conn.execute(
-            "SELECT product_name, condition FROM inventory WHERE status = 'checking'"
-        ).fetchall()
-        for row in still_checking:
-            removed.append(f"{row['product_name']} ({row['condition']})")
-        self.conn.execute(
-            "UPDATE inventory SET status = 'removed', last_seen = ? WHERE status = 'checking'",
-            (now.isoformat(),),
-        )
+                if is_new:
+                    added.append(f"{listing.product_name} ({listing.condition})")
+                elif old:
+                    old_price = old["current_price"]
+                    old_qty = old["quantity"]
+                    if old_price is not None and abs(old_price - float(listing.current_price)) > 0.001:
+                        price_changed.append(
+                            {
+                                "name": f"{listing.product_name} ({listing.condition})",
+                                "old_price": old_price,
+                                "new_price": float(listing.current_price),
+                            }
+                        )
+                    if old_qty != listing.quantity:
+                        quantity_changed.append(
+                            {
+                                "name": f"{listing.product_name} ({listing.condition})",
+                                "old_qty": old_qty,
+                                "new_qty": listing.quantity,
+                            }
+                        )
 
-        # Step 4: Log the sync
-        active_count = self.conn.execute(
-            "SELECT COUNT(*) as c FROM inventory WHERE status = 'active'"
-        ).fetchone()["c"]
+            # Step 3: Any still 'checking' → removed
+            still_checking = self.conn.execute(
+                "SELECT product_name, condition FROM inventory WHERE status = 'checking'"
+            ).fetchall()
+            for row in still_checking:
+                removed.append(f"{row['product_name']} ({row['condition']})")
+            self.conn.execute(
+                "UPDATE inventory SET status = 'removed', last_seen = ? WHERE status = 'checking'",
+                (now.isoformat(),),
+            )
 
-        self.conn.execute(
-            "INSERT INTO sync_log (timestamp, total_items, added, removed, price_changes, quantity_changes) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                now.isoformat(),
-                active_count,
-                len(added),
-                len(removed),
-                len(price_changed),
-                len(quantity_changed),
-            ),
-        )
-        self.conn.commit()
+            # Step 4: Log the sync
+            active_count = self.conn.execute(
+                "SELECT COUNT(*) as c FROM inventory WHERE status = 'active'"
+            ).fetchone()["c"]
+
+            self.conn.execute(
+                "INSERT INTO sync_log (timestamp, total_items, added, removed, price_changes, quantity_changes) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    now.isoformat(),
+                    active_count,
+                    len(added),
+                    len(removed),
+                    len(price_changed),
+                    len(quantity_changed),
+                ),
+            )
+
+            self.conn.execute("RELEASE sync")
+            self.conn.commit()
+        except Exception:
+            self.conn.execute("ROLLBACK TO sync")
+            self.conn.execute("RELEASE sync")
+            raise
 
         return SyncReport(
             timestamp=now,

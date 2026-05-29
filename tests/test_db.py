@@ -418,3 +418,24 @@ class TestIsListedFuzzyLikeEscape:
             "",
         )
         assert not db.is_listed_fuzzy("Some%", "Near Mint", "")
+
+
+class TestSyncTransactionSafety:
+    def test_sync_rolls_back_on_upsert_failure(self, db, monkeypatch):
+        """If sync() raises mid-loop, inventory rows must remain 'active', not stuck in 'checking'."""
+        listing = _make_listing(product_name="Bolt", condition="Near Mint", current_price=Decimal("1.00"))
+        db.upsert_listing(listing, "")
+        db.conn.commit()
+
+        def failing_upsert(lst, finish):
+            raise RuntimeError("simulated upsert failure")
+
+        monkeypatch.setattr(db, "upsert_listing", failing_upsert)
+
+        with pytest.raises(RuntimeError):
+            db.sync([listing])
+
+        row = db.conn.execute(
+            "SELECT status FROM inventory WHERE product_name = 'Bolt'"
+        ).fetchone()
+        assert row["status"] == "active"
