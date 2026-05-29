@@ -131,7 +131,6 @@ class LoginPage:
         Returns True if auto-login succeeded and we're now on the admin page.
         """
         import os
-
         from pathlib import Path
 
         from scryland.credentials import credentials_exist, load_credentials
