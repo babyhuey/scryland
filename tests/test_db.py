@@ -311,3 +311,48 @@ class TestUpdateTcgPrice:
             "SELECT current_price FROM inventory WHERE product_name='Sold'"
         ).fetchone()
         assert row["current_price"] == pytest.approx(2.00)
+
+
+class TestNullConditionGuard:
+    def test_find_inventory_by_canonical_tolerates_null_condition(self, db):
+        """find_inventory_by_canonical must not crash when condition is NULL."""
+        from scryland.db import canonical_key
+
+        db.conn.execute(
+            "INSERT INTO inventory (product_name, condition, finish, status, current_price, quantity, first_seen, last_seen) "
+            "VALUES ('Test Card', NULL, '', 'active', 1.00, 1, '2026-01-01T00:00:00', '2026-01-01T00:00:00')"
+        )
+        db.conn.commit()
+        key = canonical_key("Test Card", "Near Mint", False)
+        result = db.find_inventory_by_canonical(key)
+        assert result is None  # no match, but no crash
+
+
+class TestFalsyZeroPriceTracking:
+    def test_upsert_listing_records_change_from_zero(self, db):
+        """A listing with price 0.0 that gets repriced should set last_price_change."""
+        listing = _make_listing(product_name="Bolt", condition="Near Mint", current_price=Decimal("0.00"))
+        db.upsert_listing(listing, "")
+        db.conn.execute("UPDATE inventory SET current_price = 0.0 WHERE product_name = 'Bolt'")
+        db.conn.commit()
+
+        repriced = _make_listing(product_name="Bolt", condition="Near Mint", current_price=Decimal("1.50"))
+        db.upsert_listing(repriced, "")
+
+        row = db.conn.execute(
+            "SELECT last_price_change FROM inventory WHERE product_name = 'Bolt'"
+        ).fetchone()
+        assert row["last_price_change"] is not None
+
+    def test_sync_counts_change_from_zero(self, db):
+        """sync() must count a $0→$X reprice in price_changed."""
+        listing = _make_listing(product_name="Bolt", condition="Near Mint", current_price=Decimal("0.00"))
+        db.upsert_listing(listing, "")
+        db.conn.execute("UPDATE inventory SET current_price = 0.0, status = 'active' WHERE product_name = 'Bolt'")
+        db.conn.commit()
+
+        repriced = _make_listing(product_name="Bolt", condition="Near Mint", current_price=Decimal("1.50"))
+        report = db.sync([repriced])
+        assert len(report.price_changed) == 1
+        assert report.price_changed[0]["old_price"] == pytest.approx(0.0)
+        assert report.price_changed[0]["new_price"] == pytest.approx(1.50)
