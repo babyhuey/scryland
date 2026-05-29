@@ -30,9 +30,10 @@ Built because I got tired of manually retrimming 80+ listings every morning.
 
 - **`scryland optimize`** — walks TCGPlayer's Price Differential Report, matches every listing to the current TCG Lowest. Skips penny listings automatically, prompts on large drops.
 - **`scryland list-on-ebay cards.csv`** — publishes a Mythic Tools CSV to eBay with correct condition descriptors, Scryfall images, proper item specifics, and a Browse-API undercut.
-- **`scryland watch -i 60`** — runs the full cross-marketplace loop every 60 min: TCG optimize → TCG sales check → eBay undercut sweep → eBay sales check → **auto-delist on the other side when something sells**.
+- **`scryland watch -i 60`** — runs the full cross-marketplace loop every 60 min: TCG optimize → TCG sales check → eBay undercut sweep → eBay sales check → **auto-delist on the other side when something sells**. Periodically re-scrapes the full TCG inventory (default every 3 days, tunable with `--tcg-refresh-days`) to keep prices fresh for the uncompetitive-gap check.
 - **`scryland watch --ebay-only`** — faster API-only loop. Lazy-spawns a browser only when something needs delisted on TCG.
 - **`scryland watch --ebay-delist-uncompetitive-gap 0.50`** — also withdraw eBay listings whose price is more than $0.50 above the matching TCG listing (assumes similar shipping). Clears dead-weight listings buyers won't pick over the cheaper TCG copy.
+- **`scryland sales`** — scrape TCGPlayer orders, record sales, and immediately withdraw any matching eBay listings. Safe to run standalone after a TCG sale to keep both marketplaces in sync without waiting for the next watch cycle.
 - **`scryland compare`** — side-by-side price table across both marketplaces.
 - **`scryland doctor`** — one-shot health check.
 
@@ -133,8 +134,8 @@ uv run scryland price-history --card "Reprieve"
 
 **Cross-marketplace delist.** Each canonical card maps to a key like `name|set|collector#|condition|foil`. When a sale is recorded on one marketplace, Scryland looks up that key on the other side and ends the listing automatically:
 
-- **Sold on TCG → withdraw eBay offer** via `POST /sell/inventory/v1/offer/{id}/withdraw`.
-- **Sold on eBay → end TCG listing** by navigating the seller admin, setting quantity to 0, and saving.
+- **Sold on TCG → withdraw eBay offer** via `POST /sell/inventory/v1/offer/{id}/withdraw`. Happens automatically in `scryland watch` and also in `scryland sales` (run it standalone after a TCG sale to sync immediately).
+- **Sold on eBay → end TCG listing** by navigating the seller admin, setting quantity to 0, and saving. `watch` handles this; `scryland ebay-sync` is the standalone equivalent.
 
 Ambiguous matches (two printings, same name/condition) refuse to auto-act and log a warning so you can resolve manually.
 
