@@ -475,16 +475,17 @@ async def _ebay_watch_pass(
                 continue
             key = ebay_listing["canonical_key"]
             db.mark_ebay_listing_status(sku, "sold")
-            # Cross-delist on TCG (uses the open browser session).
-            if n:
-                ok = await _end_tcg_listing_by_canonical(session, config, db, key)
-                if not ok and session is not None:
-                    tcg_delist_failed += 1
-                    console.print(
-                        f"    [red]TCG delist FAILED for sold eBay card "
-                        f"(canonical: {key[:50]}…) — listing may still be "
-                        f"live on TCG[/red]"
-                    )
+            # Cross-delist on TCG — attempt for every SKU regardless of whether
+            # this order was already recorded (idempotent; reconciliation
+            # also covers this, but inline is cheaper).
+            ok = await _end_tcg_listing_by_canonical(session, config, db, key)
+            if not ok and session is not None:
+                tcg_delist_failed += 1
+                console.print(
+                    f"    [red]TCG delist FAILED for sold eBay card "
+                    f"(canonical: {key[:50]}…) — listing may still be "
+                    f"live on TCG[/red]"
+                )
     if new_ebay_sales:
         console.print(f"  [green]{new_ebay_sales} new eBay sale(s) recorded.[/green]")
     else:
@@ -1199,7 +1200,7 @@ def optimize(ctx: click.Context, dry_run: bool, volatile: bool, delist_below: fl
 
             # Use the Price Differential Report — much faster than checking each product
             console.print("Checking price differential report...")
-            opt_result = await run_price_differential_optimize(session, config, console)
+            opt_result = await run_price_differential_optimize(session, config, console, db=db)
             if opt_result.total:
                 console.print(
                     f"\n[bold]Updated {opt_result.updated} listing(s), "

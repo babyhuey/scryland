@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
 from scryland.db import InventoryDB, canonical_key
@@ -332,3 +334,99 @@ class TestCrossLookup:
 
         key = canonical_key("Reprieve", "Near Mint", False)
         assert db.find_inventory_by_canonical(key) is None
+
+
+# ---------------------------------------------------------------------------
+# Bug 2 regression: cross-delist must fire even when record_order_sales returns 0
+# (order already recorded on a prior run).
+# ---------------------------------------------------------------------------
+
+def _make_order(sku: str = "TEST-SKU") -> dict:
+    """Minimal eBay order dict with one line item."""
+    return {
+        "orderId": "ORD-001",
+        "buyer": {"username": "buyer1"},
+        "orderPaymentStatus": "PAID",
+        "creationDate": "2026-01-01T00:00:00Z",
+        "pricingSummary": {
+            "total": {"value": "5.00"},
+            "totalMarketplaceFee": {"value": "0.50"},
+            "deliveryCost": {"value": "0.00"},
+        },
+        "lineItems": [
+            {
+                "title": "Reprieve SOA #9",
+                "sku": sku,
+                "quantity": 1,
+                "lineItemCost": {"value": "5.00"},
+            }
+        ],
+    }
+
+
+async def _run_ebay_watch_pass(record_order_sales_return: int) -> AsyncMock:
+    """Helper: run _ebay_watch_pass with a single-order stub and return the
+    mock_delist spy so the caller can assert on it."""
+    import scryland.cli as cli_module
+
+    order = _make_order(sku="MY-SKU")
+    canonical = canonical_key("Reprieve SOA #9", "Near Mint", False)
+
+    db = MagicMock()
+    db.record_order_sales.return_value = record_order_sales_return
+    # fetchone returns the eBay listing row; fetchall returns no reconcile rows.
+    db.conn.execute.return_value.fetchone.return_value = {"canonical_key": canonical}
+    db.conn.execute.return_value.fetchall.return_value = []
+
+    config = MagicMock()
+    config.ebay_shipping_cost = 3.99
+
+    logger = MagicMock()
+
+    mock_auth = AsyncMock()
+    mock_auth.access_token = AsyncMock(return_value="fake-token")
+
+    mock_orders_ctx = AsyncMock()
+    mock_orders_ctx.__aenter__ = AsyncMock(return_value=mock_orders_ctx)
+    mock_orders_ctx.__aexit__ = AsyncMock(return_value=False)
+    mock_orders_ctx.iter_recent_orders = AsyncMock(return_value=[order])
+
+    mock_delist = AsyncMock(return_value=True)
+
+    mock_ebay_auth_mod = MagicMock()
+    mock_ebay_auth_mod.EbayAuth = MagicMock(return_value=mock_auth)
+    mock_ebay_orders_mod = MagicMock()
+    mock_ebay_orders_mod.EbayOrdersClient = MagicMock(return_value=mock_orders_ctx)
+    mock_ebay_orders_mod.order_to_sales_rows = order_to_sales_rows
+
+    with (
+        patch.object(cli_module, "_ebay_passphrase", return_value=None),
+        patch.object(cli_module, "_end_tcg_listing_by_canonical", mock_delist),
+        patch.dict(
+            "sys.modules",
+            {
+                "scryland.ebay.auth": mock_ebay_auth_mod,
+                "scryland.ebay.client": MagicMock(),
+                "scryland.ebay.orders": mock_ebay_orders_mod,
+            },
+        ),
+    ):
+        await cli_module._ebay_watch_pass(config, db, session=None, logger=logger)
+
+    return mock_delist
+
+
+class TestCrossDelistAlwaysFires:
+    """_ebay_watch_pass must attempt TCG delist for every sold eBay SKU
+    regardless of whether record_order_sales returns 0 (already recorded)."""
+
+    async def test_delist_fires_when_n_is_zero(self):
+        """When record_order_sales returns 0 (duplicate order), the TCG delist
+        must still be attempted — the old 'if n:' guard would skip it."""
+        mock_delist = await _run_ebay_watch_pass(record_order_sales_return=0)
+        mock_delist.assert_called_once()
+
+    async def test_delist_fires_when_n_is_nonzero(self):
+        """Sanity check: delist also fires when record_order_sales returns 1."""
+        mock_delist = await _run_ebay_watch_pass(record_order_sales_return=1)
+        mock_delist.assert_called_once()
