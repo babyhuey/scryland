@@ -972,10 +972,12 @@ class InventoryDB:
         self.conn.commit()
 
     def get_metadata(self, key: str) -> str | None:
+        """Return the stored metadata string for key, or None if unset."""
         row = self.conn.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else None
 
     def set_metadata(self, key: str, value: str) -> None:
+        """Upsert a metadata key/value pair. Used for last_tcg_scrape timestamps."""
         self.conn.execute(
             "INSERT INTO metadata(key, value) VALUES(?, ?)"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -984,6 +986,12 @@ class InventoryDB:
         self.conn.commit()
 
     def update_tcg_price(self, product_name: str, condition: str, price: float) -> int:
+        """Write a fresh TCG price to all active inventory rows matching name+condition.
+
+        Called by the optimizer after each successful price match so
+        current_price stays fresh for the eBay uncompetitive-gap delist check.
+        Returns the number of rows updated (0 = no active match found).
+        """
         cur = self.conn.execute(
             "UPDATE inventory SET current_price = ?"
             " WHERE product_name = ? AND condition = ? AND status = 'active'",

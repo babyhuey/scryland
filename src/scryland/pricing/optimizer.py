@@ -36,7 +36,17 @@ async def run_price_differential_optimize(
     console: Console,
     db=None,
 ) -> OptimizeResult:
-    """Run one pass of the price differential optimize flow."""
+    """Run one pass of the TCGPlayer Price Differential Report optimize flow.
+
+    Walks every listing that is above the current TCG Lowest, matches it,
+    and saves the new price. Skips penny listings (lowest ≤ $0.01) and
+    prompts for confirmation on large drops (configurable via config).
+
+    If db is provided, calls db.update_tcg_price after each successful match
+    so inventory.current_price stays fresh for the eBay uncompetitive-gap
+    delist check. Omit db (e.g. from the standalone optimize command) to
+    preserve existing behavior with no DB writes.
+    """
     result = OptimizeResult()
 
     report_page = PriceReportPage(session.page, config)
