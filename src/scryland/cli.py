@@ -3208,7 +3208,7 @@ def add_inventory(
         from scryland.browser.flaky import retry_on_flaky
         from scryland.browser.pages.add_inventory import AddInventoryPage
         from scryland.browser.session import BrowserSession
-        from scryland.db import InventoryDB
+        from scryland.db import InventoryDB, _escape_like
 
         session = BrowserSession(config)
         db = InventoryDB(Path(config.db_path))
@@ -3250,9 +3250,9 @@ def add_inventory(
                     front_face = card.card_name.split("//")[0].strip()
                     sold_match = db.conn.execute(
                         "SELECT product_name FROM inventory "
-                        "WHERE (product_name LIKE ? OR product_name LIKE ?) "
+                        "WHERE (product_name LIKE ? ESCAPE '\\' OR product_name LIKE ? ESCAPE '\\') "
                         "AND status = 'sold'",
-                        (f"%{card.card_name}%", f"%{front_face}%"),
+                        (f"%{_escape_like(card.card_name)}%", f"%{_escape_like(front_face)}%"),
                     ).fetchone()
                     if sold_match:
                         db_status = "sold"
