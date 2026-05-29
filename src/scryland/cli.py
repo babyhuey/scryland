@@ -2184,6 +2184,64 @@ def sales(ctx: click.Context) -> None:
                 console.print(f"  Total fees:       [red]${summary['total_fees']:.2f}[/red]")
                 console.print(f"  Net income:       [green]${summary['total_net']:.2f}[/green]")
 
+            # Cross-delist on eBay for any pending TCG sales.
+            if config.ebay_app_id:
+                from scryland.db import canonical_key as _canonical_key
+                from scryland.ebay.auth import EbayAuth
+                from scryland.ebay.client import EbayClient
+
+                console.print("\n[bold]eBay cross-delist check…[/bold]")
+                try:
+                    passphrase = _ebay_passphrase(config)
+                    auth = EbayAuth(config)
+                    await auth.access_token(passphrase)
+                    pending = db.conn.execute(
+                        "SELECT id, product_name, condition FROM sales "
+                        "WHERE (marketplace = 'tcgplayer' OR marketplace IS NULL) "
+                        "AND (cross_delist_done IS NULL OR cross_delist_done = 0) "
+                        "ORDER BY id DESC LIMIT 200"
+                    ).fetchall()
+                    withdrawn = 0
+                    async with EbayClient(config, auth, passphrase) as client:
+                        for row in pending:
+                            any_failure = False
+                            for foil in (False, True):
+                                key = _canonical_key(row["product_name"], row["condition"], foil)
+                                match = db.find_ebay_listing_by_canonical(key)
+                                if not match or not match.get("offer_id"):
+                                    continue
+                                if await client.withdraw_offer(match["offer_id"]):
+                                    db.mark_ebay_listing_status(match["sku"], "ended")
+                                    console.print(
+                                        f"  [yellow]eBay delist: '{match['product_name']}'"
+                                        f" — sold on TCG[/yellow]"
+                                    )
+                                    withdrawn += 1
+                                else:
+                                    any_failure = True
+                                    console.print(
+                                        f"  [red]eBay delist FAILED for '{match['product_name']}'"
+                                        f" — will retry next run[/red]"
+                                    )
+                            if not any_failure:
+                                db.conn.execute(
+                                    "UPDATE sales SET cross_delist_done = 1 WHERE id = ?",
+                                    (row["id"],),
+                                )
+                        if pending:
+                            db.conn.commit()
+                    if withdrawn:
+                        console.print(f"[green]Withdrew {withdrawn} eBay listing(s).[/green]")
+                    elif pending:
+                        console.print("  [dim]No matching eBay listings found.[/dim]")
+                    else:
+                        console.print("  [dim]No pending TCG sales to cross-delist.[/dim]")
+                except Exception:
+                    console.print(
+                        "  [yellow]eBay cross-delist skipped — auth unavailable.[/yellow]"
+                    )
+                    logger.warning("eBay cross-delist failed", exc_info=True)
+
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
         except Exception:
