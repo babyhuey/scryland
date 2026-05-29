@@ -172,8 +172,17 @@ async def _end_tcg_listing_by_canonical(session, config, db, canonical_key: str)
                 canonical_key,
             )
             return True
-        return False
-        return False
+        # No inventory row at all — card wasn't tracked in TCG; nothing to delist.
+        # (Reconciliation sweep already skips these for the same reason.)
+        logger.debug(
+            "TCG listing for canonical '%s' not in inventory — skipping delist",
+            canonical_key,
+        )
+        console.print(
+            f"  [dim]Sold eBay card not in TCG inventory — skipping delist "
+            f"(canonical: {canonical_key[:50]}…)[/dim]"
+        )
+        return True
     inventory_page = InventoryPage(session.page, config)
     pricing_page = PricingPage(session.page, config)
     try:
