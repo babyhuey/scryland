@@ -132,9 +132,12 @@ class LoginPage:
         """
         import os
 
+        from pathlib import Path
+
         from scryland.credentials import credentials_exist, load_credentials
 
-        if not credentials_exist():
+        base_dir = Path(self._config.db_path).parent
+        if not credentials_exist(base_dir=base_dir):
             return False
 
         from rich.console import Console
@@ -156,7 +159,7 @@ class LoginPage:
                 )
                 return False
 
-        creds = load_credentials(passphrase)
+        creds = load_credentials(passphrase, base_dir=base_dir)
         if not creds:
             console.print("[red]Could not decrypt credentials. Falling back to manual login.[/red]")
             return False

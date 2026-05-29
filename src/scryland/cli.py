@@ -1470,11 +1470,17 @@ def credentials() -> None:
 
 
 @credentials.command("set")
-def credentials_set() -> None:
+@click.pass_context
+def credentials_set(ctx: click.Context) -> None:
     """Store encrypted login credentials for auto-login."""
+    from pathlib import Path
+
     from rich.prompt import Prompt
 
     from scryland.credentials import save_credentials
+
+    config: ScrylandConfig = ctx.obj["config"]
+    base_dir = Path(config.db_path).parent
 
     console.print("[bold]Store TCGPlayer login credentials[/bold]")
     console.print("Credentials will be encrypted with a passphrase you choose.")
@@ -1498,32 +1504,44 @@ def credentials_set() -> None:
         console.print("[red]Passphrases don't match. Try again.[/red]")
         return
 
-    save_credentials(username, password, passphrase)
+    save_credentials(username, password, passphrase, base_dir=base_dir)
     console.print("[green]Credentials saved and encrypted![/green]")
 
 
 @credentials.command("clear")
-def credentials_clear() -> None:
+@click.pass_context
+def credentials_clear(ctx: click.Context) -> None:
     """Delete stored credentials."""
+    from pathlib import Path
+
     from rich.prompt import Confirm
 
     from scryland.credentials import clear_credentials, credentials_exist
 
-    if not credentials_exist():
+    config: ScrylandConfig = ctx.obj["config"]
+    base_dir = Path(config.db_path).parent
+
+    if not credentials_exist(base_dir=base_dir):
         console.print("No stored credentials found.")
         return
 
     if Confirm.ask("Delete stored credentials?", default=False):
-        clear_credentials()
+        clear_credentials(base_dir=base_dir)
         console.print("[green]Credentials deleted.[/green]")
 
 
 @credentials.command("status")
-def credentials_status() -> None:
+@click.pass_context
+def credentials_status(ctx: click.Context) -> None:
     """Check if credentials are stored."""
+    from pathlib import Path
+
     from scryland.credentials import credentials_exist
 
-    if credentials_exist():
+    config: ScrylandConfig = ctx.obj["config"]
+    base_dir = Path(config.db_path).parent
+
+    if credentials_exist(base_dir=base_dir):
         console.print("[green]Encrypted credentials are stored.[/green]")
     else:
         console.print(

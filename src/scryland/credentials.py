@@ -28,6 +28,12 @@ _CREDENTIALS_FILE = ".scryland_credentials"
 _SALT_FILE = ".scryland_salt"
 
 
+def _resolve(filename: str, base_dir: "Path | None") -> "Path":
+    if base_dir is not None:
+        return base_dir / filename
+    return Path(filename)
+
+
 def _derive_key(passphrase: str, salt: bytes) -> bytes:
     """Derive a Fernet key from a passphrase and salt using PBKDF2."""
     kdf = PBKDF2HMAC(
@@ -39,7 +45,9 @@ def _derive_key(passphrase: str, salt: bytes) -> bytes:
     return base64.urlsafe_b64encode(kdf.derive(passphrase.encode()))
 
 
-def save_credentials(username: str, password: str, passphrase: str) -> None:
+def save_credentials(
+    username: str, password: str, passphrase: str, *, base_dir: "Path | None" = None
+) -> None:
     """Encrypt and save credentials to disk."""
     import os
 
@@ -51,26 +59,28 @@ def save_credentials(username: str, password: str, passphrase: str) -> None:
     encrypted = fernet.encrypt(payload)
 
     # Save salt
-    salt_path = Path(_SALT_FILE)
+    salt_path = _resolve(_SALT_FILE, base_dir)
     salt_path.write_bytes(salt)
     salt_path.chmod(0o600)
 
     # Save encrypted credentials
-    cred_path = Path(_CREDENTIALS_FILE)
+    cred_path = _resolve(_CREDENTIALS_FILE, base_dir)
     cred_path.write_bytes(encrypted)
     cred_path.chmod(0o600)
 
     logger.info("Credentials saved (encrypted)")
 
 
-def load_credentials(passphrase: str) -> tuple[str, str] | None:
+def load_credentials(
+    passphrase: str, *, base_dir: "Path | None" = None
+) -> tuple[str, str] | None:
     """Load and decrypt credentials from disk.
 
     Returns (username, password) or None if credentials don't exist or
     passphrase is wrong.
     """
-    cred_path = Path(_CREDENTIALS_FILE)
-    salt_path = Path(_SALT_FILE)
+    cred_path = _resolve(_CREDENTIALS_FILE, base_dir)
+    salt_path = _resolve(_SALT_FILE, base_dir)
 
     if not cred_path.exists() or not salt_path.exists():
         return None
@@ -91,14 +101,16 @@ def load_credentials(passphrase: str) -> tuple[str, str] | None:
         return None
 
 
-def credentials_exist() -> bool:
+def credentials_exist(*, base_dir: "Path | None" = None) -> bool:
     """Check if encrypted credentials are stored."""
-    return Path(_CREDENTIALS_FILE).exists() and Path(_SALT_FILE).exists()
+    return _resolve(_CREDENTIALS_FILE, base_dir).exists() and _resolve(
+        _SALT_FILE, base_dir
+    ).exists()
 
 
-def clear_credentials() -> None:
+def clear_credentials(*, base_dir: "Path | None" = None) -> None:
     """Delete stored credentials."""
-    for path in [Path(_CREDENTIALS_FILE), Path(_SALT_FILE)]:
+    for path in [_resolve(_CREDENTIALS_FILE, base_dir), _resolve(_SALT_FILE, base_dir)]:
         if path.exists():
             path.unlink()
     logger.info("Credentials cleared")
