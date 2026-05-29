@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -146,6 +147,10 @@ class EbayAuth:
             )
         r.raise_for_status()
         data = r.json()
+        if "access_token" not in data:
+            raise RuntimeError(
+                f"eBay app token response missing access_token. Keys present: {list(data.keys())}"
+            )
         self._app_token = data["access_token"]
         self._app_token_expires_at = time.time() + int(data.get("expires_in", 0))
         return self._app_token
@@ -182,6 +187,10 @@ class EbayAuth:
         data: dict,
         fallback_refresh: str | None = None,
     ) -> TokenBundle:
+        if "access_token" not in data:
+            raise RuntimeError(
+                f"eBay token response missing access_token. Keys present: {list(data.keys())}"
+            )
         return TokenBundle(
             access_token=data["access_token"],
             expires_at=time.time() + int(data.get("expires_in", 0)),
@@ -201,10 +210,15 @@ class EbayAuth:
     def _path(self) -> Path:
         return Path(self._config.ebay_credentials_path)
 
+    def _salt_path(self) -> Path:
+        return Path(str(self._path()) + ".salt")
+
     def _save(self, bundle: TokenBundle, passphrase: str) -> None:
         from cryptography.fernet import Fernet
 
-        salt = b"scryland-ebay-salt"
+        salt = os.urandom(16)
+        self._salt_path().write_bytes(salt)
+        self._salt_path().chmod(0o600)
         key = _derive_key(passphrase, salt)
         f = Fernet(key)
         payload = json.dumps(
@@ -224,7 +238,11 @@ class EbayAuth:
 
         if not self._path().exists():
             raise RuntimeError("No eBay credentials found. Run `scryland ebay-auth` first.")
-        salt = b"scryland-ebay-salt"
+        if self._salt_path().exists():
+            salt = self._salt_path().read_bytes()
+        else:
+            # Migration path: old installs used a hardcoded salt.
+            salt = b"scryland-ebay-salt"
         key = _derive_key(passphrase, salt)
         try:
             payload = Fernet(key).decrypt(self._path().read_bytes())

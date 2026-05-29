@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 
@@ -238,3 +239,77 @@ class TestRequireConfig:
         auth = EbayAuth(c)
         with pytest.raises(RuntimeError, match="ebay_app_id"):
             auth._require("ebay_app_id", "ebay_cert_id")
+
+
+class TestRandomSalt:
+    def test_save_creates_salt_file(self, config_prod):
+        """_save must create a separate salt file."""
+        auth = EbayAuth(config_prod)
+        bundle = TokenBundle(access_token="tok", expires_at=9999999999.0, refresh_token="ref")
+        auth._save(bundle, "passphrase")
+        salt_path = Path(str(config_prod.ebay_credentials_path) + ".salt")
+        assert salt_path.exists()
+        assert len(salt_path.read_bytes()) == 16
+
+    def test_two_saves_use_different_salts(self, config_prod):
+        """Each save must generate a fresh random salt."""
+        auth = EbayAuth(config_prod)
+        bundle = TokenBundle(access_token="tok", expires_at=9999999999.0, refresh_token="ref")
+        auth._save(bundle, "passphrase")
+        salt_path = Path(str(config_prod.ebay_credentials_path) + ".salt")
+        salt1 = salt_path.read_bytes()
+        auth._save(bundle, "passphrase")
+        salt2 = salt_path.read_bytes()
+        assert salt1 != salt2
+
+    def test_roundtrip_with_random_salt(self, config_prod):
+        """Credentials saved with random salt must be loadable."""
+        auth = EbayAuth(config_prod)
+        bundle = TokenBundle(access_token="acc", expires_at=9999999999.0, refresh_token="ref")
+        auth._save(bundle, "mypassphrase")
+        loaded = auth._load("mypassphrase")
+        assert loaded.access_token == "acc"
+        assert loaded.refresh_token == "ref"
+
+    def test_migration_from_hardcoded_salt(self, config_prod):
+        """Old credentials (no salt file) must still load via hardcoded-salt fallback."""
+        import json
+
+        from cryptography.fernet import Fernet
+
+        from scryland.credentials import _derive_key
+
+        # Manually create credentials with the OLD hardcoded salt
+        old_salt = b"scryland-ebay-salt"
+        key = _derive_key("oldpassphrase", old_salt)
+        payload = json.dumps(
+            {
+                "environment": "production",
+                "access_token": "oldtok",
+                "expires_at": 9999999999.0,
+                "refresh_token": "oldref",
+            }
+        ).encode()
+        encrypted = Fernet(key).encrypt(payload)
+        Path(config_prod.ebay_credentials_path).write_bytes(encrypted)
+        # Do NOT create the .salt file (simulates old install)
+
+        auth = EbayAuth(config_prod)
+        loaded = auth._load("oldpassphrase")
+        assert loaded.access_token == "oldtok"
+
+
+class TestParseTokenResponseGuard:
+    def test_missing_access_token_raises_runtime_error(self, config_prod):
+        """A 200 response without access_token must raise RuntimeError, not KeyError."""
+        auth = EbayAuth(config_prod)
+        with pytest.raises(RuntimeError, match="access_token"):
+            auth._parse_token_response({})
+
+    def test_valid_response_parsed_correctly(self, config_prod):
+        auth = EbayAuth(config_prod)
+        bundle = auth._parse_token_response(
+            {"access_token": "tok", "expires_in": 7200, "refresh_token": "ref"}
+        )
+        assert bundle.access_token == "tok"
+        assert bundle.refresh_token == "ref"
