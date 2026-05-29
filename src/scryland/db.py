@@ -663,10 +663,11 @@ class InventoryDB:
     def record_sale(self, sale: dict) -> bool:
         """Record a sale from the orders page. Returns True if new."""
         now = datetime.now(UTC).isoformat()
+        marketplace = sale.get("_marketplace") or "tcgplayer"
 
         existing = self.conn.execute(
-            "SELECT id FROM sales WHERE order_number = ? AND product_name = ? AND condition = ?",
-            (sale["order_number"], sale["product_name"], sale.get("condition", "")),
+            "SELECT id FROM sales WHERE order_number = ? AND product_name = ? AND condition = ? AND marketplace = ?",
+            (sale["order_number"], sale["product_name"], sale.get("condition", ""), marketplace),
         ).fetchone()
 
         if existing:
@@ -675,8 +676,8 @@ class InventoryDB:
         self.conn.execute(
             "INSERT INTO sales "
             "(order_number, order_date, buyer_name, status, product_name, condition, "
-            "quantity, sale_price, shipping_amt, total_amount, fee_amount, net_amount, recorded_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "quantity, sale_price, shipping_amt, total_amount, fee_amount, net_amount, recorded_at, marketplace) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 sale["order_number"],
                 sale.get("order_date", ""),
@@ -691,6 +692,7 @@ class InventoryDB:
                 sale.get("fee_amount", 0),
                 sale.get("net_amount", 0),
                 now,
+                marketplace,
             ),
         )
 
@@ -702,36 +704,37 @@ class InventoryDB:
     def record_order_sales(self, sales: list[dict]) -> int:
         """Atomically record every product sold in a single order.
 
-        Inserts are wrapped in one transaction so a mid-order failure leaves
-        the order unrecorded, letting the next run re-scrape it. Returns the
-        count of new sale rows inserted (zero if the order was already known).
+        Uses a SAVEPOINT so this is safe to call whether or not an outer
+        transaction is already open (avoids BEGIN-within-BEGIN errors with
+        sqlite3's implicit transaction management). Returns the count of new
+        sale rows inserted (zero if the order was already known).
         """
         if not sales:
             return 0
 
         new_count = 0
         try:
-            self.conn.execute("BEGIN")
+            self.conn.execute("SAVEPOINT record_order_sales")
             for sale in sales:
                 if self._insert_sale_row(sale):
                     new_count += 1
-            self.conn.commit()
+            self.conn.execute("RELEASE record_order_sales")
         except Exception:
-            self.conn.rollback()
+            self.conn.execute("ROLLBACK TO record_order_sales")
+            self.conn.execute("RELEASE record_order_sales")
             raise
         return new_count
 
     def _insert_sale_row(self, sale: dict) -> bool:
         """Insert one sale row (no commit). Returns True if new."""
         now = datetime.now(UTC).isoformat()
+        marketplace = sale.get("_marketplace") or "tcgplayer"
         existing = self.conn.execute(
-            "SELECT id FROM sales WHERE order_number = ? AND product_name = ? AND condition = ?",
-            (sale["order_number"], sale["product_name"], sale.get("condition", "")),
+            "SELECT id FROM sales WHERE order_number = ? AND product_name = ? AND condition = ? AND marketplace = ?",
+            (sale["order_number"], sale["product_name"], sale.get("condition", ""), marketplace),
         ).fetchone()
         if existing:
             return False
-
-        marketplace = sale.get("_marketplace") or "tcgplayer"
         self.conn.execute(
             "INSERT INTO sales "
             "(order_number, order_date, buyer_name, status, product_name, condition, "
