@@ -1015,8 +1015,10 @@ class InventoryDB:
         self.conn.commit()
         return cur.rowcount
 
-    def find_inventory_by_canonical(self, key: str) -> dict | None:
-        """Return the active inventory row whose canonical key matches.
+    def find_inventory_by_canonical(
+        self, key: str, *, include_removed: bool = False
+    ) -> dict | None:
+        """Return the inventory row whose canonical key matches.
 
         Inventory often has empty set/collector, so we match in tiers:
           1. Strict key equality.
@@ -1027,8 +1029,16 @@ class InventoryDB:
         If the fuzziest tier yields multiple candidates we refuse to pick
         one (avoids wrong-printing delists). The caller sees None and
         should manually reconcile.
+
+        include_removed: also search 'removed' rows. Useful for detecting
+        a listing that was already successfully delisted in a prior run.
         """
-        rows = self.conn.execute("SELECT * FROM inventory WHERE status = 'active'").fetchall()
+        status_clause = (
+            "status IN ('active', 'removed')" if include_removed else "status = 'active'"
+        )
+        rows = self.conn.execute(
+            f"SELECT * FROM inventory WHERE {status_clause}"  # noqa: S608
+        ).fetchall()
         # Phase 1 + 2: exact/loose match — return immediately on hit.
         fallback_matches: list[dict] = []
         parts_cache = key.split("|") if "|" in key else []

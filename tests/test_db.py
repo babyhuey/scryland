@@ -462,3 +462,38 @@ class TestSyncTransactionSafety:
 
         row = db.conn.execute("SELECT status FROM inventory WHERE product_name = 'Bolt'").fetchone()
         assert row["status"] == "active"
+
+
+class TestFindInventoryByCanonicalIncludeRemoved:
+    def test_active_found_without_flag(self, db):
+        from scryland.db import canonical_key
+
+        db.conn.execute(
+            "INSERT INTO inventory (product_name, condition, finish, status, current_price, quantity, first_seen, last_seen) "
+            "VALUES ('Fireball', 'Near Mint', '', 'active', 1.00, 1, '2026-01-01', '2026-01-01')"
+        )
+        db.conn.commit()
+        key = canonical_key("Fireball", "Near Mint", False)
+        assert db.find_inventory_by_canonical(key) is not None
+
+    def test_removed_not_found_by_default(self, db):
+        from scryland.db import canonical_key
+
+        db.conn.execute(
+            "INSERT INTO inventory (product_name, condition, finish, status, current_price, quantity, first_seen, last_seen) "
+            "VALUES ('Fireball', 'Near Mint', '', 'removed', 1.00, 1, '2026-01-01', '2026-01-01')"
+        )
+        db.conn.commit()
+        key = canonical_key("Fireball", "Near Mint", False)
+        assert db.find_inventory_by_canonical(key) is None
+
+    def test_removed_found_with_include_removed(self, db):
+        from scryland.db import canonical_key
+
+        db.conn.execute(
+            "INSERT INTO inventory (product_name, condition, finish, status, current_price, quantity, first_seen, last_seen) "
+            "VALUES ('Fireball', 'Near Mint', '', 'removed', 1.00, 1, '2026-01-01', '2026-01-01')"
+        )
+        db.conn.commit()
+        key = canonical_key("Fireball", "Near Mint", False)
+        assert db.find_inventory_by_canonical(key, include_removed=True) is not None
