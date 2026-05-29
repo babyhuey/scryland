@@ -143,6 +143,31 @@ class TestIterRecentOrders:
         assert any("ceiling" in r.message for r in caplog.records)
         await client._http.aclose()
 
+    async def test_order_to_sales_rows_handles_dict_line_items(self):
+        """eBay sometimes returns lineItems as a dict for single-item orders; must not crash."""
+        from scryland.ebay.orders import order_to_sales_rows
+
+        order = {
+            "orderId": "ORDER-1",
+            "buyer": {"username": "buyer1"},
+            "orderPaymentStatus": "PAID",
+            "creationDate": "2026-01-01T00:00:00Z",
+            "pricingSummary": {
+                "total": {"value": "5.00", "currency": "USD"},
+                "totalMarketplaceFee": {"value": "0.50", "currency": "USD"},
+                "deliveryCost": {"value": "0.99", "currency": "USD"},
+            },
+            "lineItems": {
+                "title": "Lightning Bolt NM",
+                "sku": "SKU-001",
+                "quantity": "1",
+                "lineItemCost": {"value": "5.00", "currency": "USD"},
+            },
+        }
+        rows = order_to_sales_rows(order)
+        assert len(rows) == 1
+        assert rows[0]["product_name"] == "Lightning Bolt NM"
+
     async def test_http_error_returns_partial(self, caplog):
         import logging
 
