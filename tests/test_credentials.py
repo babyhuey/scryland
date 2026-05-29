@@ -65,3 +65,28 @@ class TestClearCredentials:
 
     def test_clear_when_none(self):
         clear_credentials()  # Should not raise
+
+
+def test_save_and_load_with_explicit_base_dir(tmp_path):
+    """save/load must use base_dir, not CWD."""
+    base = tmp_path / "subdir"
+    base.mkdir()
+    save_credentials("user", "pass", "phrase", base_dir=base)
+    result = load_credentials("phrase", base_dir=base)
+    assert result == ("user", "pass")
+
+
+def test_credentials_exist_respects_base_dir(tmp_path):
+    base = tmp_path / "subdir"
+    base.mkdir()
+    assert not credentials_exist(base_dir=base)
+    save_credentials("u", "p", "x", base_dir=base)
+    assert credentials_exist(base_dir=base)
+
+
+def test_clear_credentials_respects_base_dir(tmp_path):
+    base = tmp_path / "subdir"
+    base.mkdir()
+    save_credentials("u", "p", "x", base_dir=base)
+    clear_credentials(base_dir=base)
+    assert not credentials_exist(base_dir=base)
