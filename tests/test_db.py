@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from scryland.db import InventoryDB
+from scryland.db import InventoryDB, _escape_like
 from scryland.models import Listing
 
 
@@ -356,3 +356,21 @@ class TestFalsyZeroPriceTracking:
         assert len(report.price_changed) == 1
         assert report.price_changed[0]["old_price"] == pytest.approx(0.0)
         assert report.price_changed[0]["new_price"] == pytest.approx(1.50)
+
+
+class TestIsListedFuzzyLikeEscape:
+    def test_underscore_in_name_does_not_match_wildcard(self, db):
+        """A card name with _ should not match a card with a different character there."""
+        db.upsert_listing(
+            _make_listing(product_name="Vessel of Nascency", condition="Near Mint", current_price=Decimal("0.50")),
+            "",
+        )
+        assert not db.is_listed_fuzzy("Vessel_of_Nascency", "Near Mint", "")
+
+    def test_percent_in_name_does_not_expand(self, db):
+        """A card name with % should not match anything-goes wildcard expansion."""
+        db.upsert_listing(
+            _make_listing(product_name="Some Card", condition="Near Mint", current_price=Decimal("1.00")),
+            "",
+        )
+        assert not db.is_listed_fuzzy("Some%", "Near Mint", "")

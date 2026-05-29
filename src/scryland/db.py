@@ -384,8 +384,8 @@ class InventoryDB:
         if front_face != card_name:
             row = self.conn.execute(
                 "SELECT id FROM inventory "
-                "WHERE product_name LIKE ? AND condition = ? AND finish = ? AND status = 'active'",
-                (f"%{front_face}%", condition, finish),
+                "WHERE product_name LIKE ? ESCAPE '\\' AND condition = ? AND finish = ? AND status = 'active'",
+                (f"%{_escape_like(front_face)}%", condition, finish),
             ).fetchone()
             if row:
                 return True
@@ -393,8 +393,8 @@ class InventoryDB:
         # Check if any active listing contains this card name
         row = self.conn.execute(
             "SELECT id FROM inventory "
-            "WHERE product_name LIKE ? AND condition = ? AND finish = ? AND status = 'active'",
-            (f"%{card_name}%", condition, finish),
+            "WHERE product_name LIKE ? ESCAPE '\\' AND condition = ? AND finish = ? AND status = 'active'",
+            (f"%{_escape_like(card_name)}%", condition, finish),
         ).fetchone()
         return row is not None
 
