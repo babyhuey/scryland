@@ -289,7 +289,7 @@ class InventoryDB:
             }
             # Track price changes
             old_price = existing["current_price"]
-            if old_price and abs(old_price - float(listing.current_price)) > 0.001:
+            if old_price is not None and abs(old_price - float(listing.current_price)) > 0.001:
                 updates["last_price_change"] = now
 
             # If the new scrape carries the full DFC form ("X // Y") and
@@ -602,7 +602,7 @@ class InventoryDB:
             elif old:
                 old_price = old["current_price"]
                 old_qty = old["quantity"]
-                if old_price and abs(old_price - float(listing.current_price)) > 0.001:
+                if old_price is not None and abs(old_price - float(listing.current_price)) > 0.001:
                     price_changed.append(
                         {
                             "name": f"{listing.product_name} ({listing.condition})",
@@ -1019,14 +1019,15 @@ class InventoryDB:
         parts_cache = key.split("|") if "|" in key else []
         for row in rows:
             is_foil = "foil" in (row["finish"] or "").lower()
+            row_condition = row["condition"] or ""
             strict = canonical_key(
                 row["product_name"],
-                row["condition"],
+                row_condition,
                 is_foil,
                 set_name=row["set_name"] or "",
                 collector_number="",
             )
-            loose = canonical_key(row["product_name"], row["condition"], is_foil)
+            loose = canonical_key(row["product_name"], row_condition, is_foil)
             if key == strict or key == loose:
                 return dict(row)
             # Phase 3: collect fuzzy candidates, then disambiguate.
@@ -1034,7 +1035,7 @@ class InventoryDB:
                 k_name, k_set, _k_num, k_cond, k_foil = parts_cache
                 r_name = _norm_name(row["product_name"])
                 r_set = _norm_name(row["set_name"] or "")
-                r_cond = row["condition"].replace("Foil", "").strip().lower()
+                r_cond = row_condition.replace("Foil", "").strip().lower()
                 r_foil = "F" if is_foil else "N"
                 set_ok = (not k_set) or (not r_set) or (k_set == r_set)
                 if k_name == r_name and k_cond == r_cond and k_foil == r_foil and set_ok:
