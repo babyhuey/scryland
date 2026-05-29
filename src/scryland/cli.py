@@ -2579,19 +2579,21 @@ def watch(
 ) -> None:
     """Recurring multi-marketplace price optimizer + sales watcher.
 
+    \b
     Each iteration does (unless --ebay-only):
-      1. TCG: Price Differential Report → apply updates / delists.
-      2. TCG: floor sweep — end listings priced at/below --delist-below
-         (default $0.01; pass 0 to disable). Catches cards already at
-         the bottom of market that the differential report misses.
-      3. TCG: check orders for new sales → record to DB.
+      1. TCG: periodic full inventory scrape every --tcg-refresh-days days
+         (default 3) to keep current_price fresh.
+      2. TCG: Price Differential Report → apply updates / delists.
+      3. TCG: floor sweep — end listings priced at/below --delist-below
+         (default $0.01; pass 0 to disable).
+      4. TCG: check orders for new sales → record to DB.
     Then always (unless --no-ebay):
-      4. eBay: fetch recent orders → record sales → mark our listings sold
+      5. eBay: fetch recent orders → record sales → mark our listings sold
          → cross-delist matching TCG listings (via the open browser).
-      5. eBay: for each TCG sale just recorded, withdraw matching eBay offers.
-      6. eBay: Browse-API undercut sweep — bump our prices to (lowest-$0.01),
+      6. eBay: withdraw eBay offers for any TCG sale not yet cross-delisted.
+      7. eBay: Browse-API undercut sweep — bump prices to (lowest-$0.01),
          floored by --ebay-min-price, ceilinged by --ebay-max-price.
-      7. eBay: if --ebay-delist-below set, end listings when market drops
+      8. eBay: if --ebay-delist-below set, end listings when market drops
          below that threshold.
 
     --ebay-only skips the browser entirely — all API, no TCG scraping.
