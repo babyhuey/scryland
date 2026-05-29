@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### `scryland sales`
+- Now auto-withdraws matching eBay offers at the end of every run (same logic as the `watch` cross-delist). Run it standalone after a TCG sale to sync both marketplaces immediately without waiting for the next watch cycle.
+
+### `scryland watch`
+- New `--tcg-refresh-days FLOAT` option (default 3.0): periodically runs a full TCG inventory scrape before the optimize step so `inventory.current_price` stays fresh for the `--ebay-delist-uncompetitive-gap` check. Pass `0` to disable.
+- Optimizer now writes the matched price back to `inventory.current_price` immediately after each successful price update (point-of-change freshness between periodic scrapes).
+
+### Browser reliability
+- `_apply_my_inventory_filter` now verifies the filter actually applied by comparing Manage vs Add button counts, with up to 3 hard-reload retries. Silent failures previously caused the floor sweep to scan the global TCGPlayer catalog instead of the user's inventory.
+
 ### `add-inventory` improvements
 - `--include-sold` flag re-lists cards that the DB shows as previously sold (use when the CSV is your full current inventory and you've re-acquired things).
 - Auto-writes `<input>_priced.csv` at the end of every run with the real TCG-found prices substituted into the Price columns. Subsequent runs against that file skip floor cards via the existing `--csv-min-price` pre-filter without a second TCG search.
@@ -42,7 +52,7 @@ Initial public release.
 - **Retry helpers** for flaky Playwright errors (stale handles, context destroyed, ERR_ABORTED, timeouts with page-reload recovery).
 
 ### Tooling
-- 341 tests, pytest + pytest-asyncio + pytest-cov.
+- 361 tests, pytest + pytest-asyncio + pytest-cov.
 - Ruff lint + format.
 - Mypy type-check (soft).
 - Pre-commit hooks: trailing whitespace, EOF, YAML/TOML validation, ruff lint + format, mypy, pytest on push.
