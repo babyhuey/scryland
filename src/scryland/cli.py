@@ -165,6 +165,14 @@ async def _end_tcg_listing_by_canonical(session, config, db, canonical_key: str)
         return False
     row = db.find_inventory_by_canonical(canonical_key)
     if not row:
+        # Check if already delisted in a prior run — not a failure.
+        if db.find_inventory_by_canonical(canonical_key, include_removed=True):
+            logger.debug(
+                "TCG listing for canonical '%s' already removed — skipping re-delist",
+                canonical_key,
+            )
+            return True
+        return False
         return False
     inventory_page = InventoryPage(session.page, config)
     pricing_page = PricingPage(session.page, config)
