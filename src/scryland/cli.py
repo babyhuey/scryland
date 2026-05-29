@@ -57,8 +57,9 @@ async def _fast_update_ebay_price(
 ) -> bool:
     """Update an already-listed eBay offer's price without republishing.
 
-    Skips Scryfall + inventory_item PUT + publish — ~5x faster than the
-    full pipeline. Use when the card data hasn't changed, only the price.
+    Skips Scryfall lookup, inventory_item PUT, and publish — ~5x faster than
+    the full list-on-ebay pipeline. Also upserts the new price into the local
+    ebay_listings table. Use when card data hasn't changed, only the price.
     """
     import logging
 
@@ -400,10 +401,13 @@ async def _ebay_watch_pass(
 
     Steps:
       1. Fetch recent eBay orders → record sales → mark our eBay listing sold.
+      1b. Reconciliation sweep: re-check all sold eBay listings and ensure the
+          matching TCG listing is also delisted (catches prior missed delistings).
       2. For each sold eBay listing, delist the matching TCG listing.
-      3. For each TCG sale recorded this run, withdraw matching eBay offers.
+      3. For all TCG sales with cross_delist_done=0, withdraw matching eBay
+         offers via the Sell API and mark them done.
       4. Price undercut sweep: for each active eBay listing, query Browse
-         and update the offer price to undercut by $0.01.
+         and update the offer price to undercut competitors by $0.01.
     Returns counts for the run summary.
     """
     from dataclasses import dataclass
@@ -2092,8 +2096,14 @@ def sales(ctx: click.Context) -> None:
     """Scrape TCGPlayer orders and record sales to the local DB.
 
     Atomic per-order: a partial scrape failure leaves the whole order
-    unrecorded so the next run can retry. For eBay sales, use `ebay-sync`
-    instead.
+    unrecorded so the next run can retry.
+
+    After recording sales, automatically withdraws any matching active eBay
+    offers (cross_delist_done=0 rows) via the Sell API — same logic as the
+    watch loop's cross-delist step. Safe to run standalone after a TCG sale
+    to sync both marketplaces without waiting for the next watch cycle.
+
+    For eBay sales, use `ebay-sync` instead.
     """
     config: ScrylandConfig = ctx.obj["config"]
     logger = ctx.obj["logger"]
