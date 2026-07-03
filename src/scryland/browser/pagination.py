@@ -92,9 +92,7 @@ async def click_next_page(page: Page, timeout_ms: int = 15000) -> NextPageResult
             timeout=timeout_ms,
         )
     except Exception:
-        logger.warning(
-            "Pagination Next click did not change page content within %dms", timeout_ms
-        )
+        logger.warning("Pagination Next click did not change page content within %dms", timeout_ms)
         return NextPageResult.STALLED
 
     return NextPageResult.ADVANCED

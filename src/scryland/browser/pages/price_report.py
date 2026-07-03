@@ -94,9 +94,7 @@ class PriceReportPage:
             new_rows = _dedupe_new_rows(results, seen)
             all_results.extend(new_rows)
 
-            logger.debug(
-                "Report page %d: %d rows (%d new)", page_num, len(results), len(new_rows)
-            )
+            logger.debug("Report page %d: %d rows (%d new)", page_num, len(results), len(new_rows))
 
             nxt = await click_next_page(self._page)
             if nxt is NextPageResult.LAST_PAGE:
