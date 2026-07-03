@@ -708,7 +708,7 @@ class InventoryDB:
             ),
         )
 
-        self._mark_inventory_sold(sale["product_name"], now)
+        self._mark_inventory_sold(sale["product_name"], now, sale.get("condition", ""))
 
         self.conn.commit()
         return True
@@ -770,21 +770,33 @@ class InventoryDB:
                 marketplace,
             ),
         )
-        self._mark_inventory_sold(sale["product_name"], now)
+        self._mark_inventory_sold(sale["product_name"], now, sale.get("condition", ""))
         return True
 
-    def _mark_inventory_sold(self, product_name: str, now_iso: str) -> None:
+    def _mark_inventory_sold(self, product_name: str, now_iso: str, condition: str = "") -> None:
         """Mark active inventory rows matching `product_name` as sold.
 
-        Escapes LIKE wildcards so a card name containing `%` or `_`
-        doesn't cascade into unrelated rows.
+        Matches product_name by case-insensitive EQUALITY, not a `%name%`
+        substring scan — the old substring match marked unrelated cards sold
+        too (e.g. "Island" matching "Island of Wak-Wak"). When the sale's
+        condition is known, also constrains on it (and the finish embedded
+        in it, e.g. "Near Mint Foil") so selling one condition/finish
+        doesn't mark every other condition/finish of the same card sold.
         """
-        safe = _escape_like(product_name)
-        self.conn.execute(
-            "UPDATE inventory SET status = 'sold', last_seen = ? "
-            "WHERE product_name LIKE ? ESCAPE '\\' AND status = 'active'",
-            (now_iso, f"%{safe}%"),
-        )
+        if condition:
+            finish = "Foil" if "Foil" in condition else ""
+            self.conn.execute(
+                "UPDATE inventory SET status = 'sold', last_seen = ? "
+                "WHERE LOWER(product_name) = LOWER(?) AND condition = ? AND finish = ? "
+                "AND status = 'active'",
+                (now_iso, product_name, condition, finish),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE inventory SET status = 'sold', last_seen = ? "
+                "WHERE LOWER(product_name) = LOWER(?) AND status = 'active'",
+                (now_iso, product_name),
+            )
 
     def get_known_order_numbers(self) -> set[str]:
         """Get all order numbers already recorded."""
