@@ -116,3 +116,42 @@ class TestPricingReport:
         assert report.updates_applied == 0
         assert report.dry_run is False
         assert report.updates == []
+
+
+class TestReportTimestampNotFrozenAtImport:
+    """`timestamp: datetime = datetime.now(UTC)` is a mutable default —
+    it's evaluated once at class-definition time and shared by every
+    instance. It must be a default_factory so each instance gets its own
+    fresh timestamp. Verified by spying on datetime.now rather than
+    sleeping between instantiations (which would be flaky either way)."""
+
+    def _spy(self, monkeypatch):
+        import scryland.models as models_mod
+
+        calls: list[None] = []
+        real_now = models_mod.datetime.now
+
+        class SpyDatetime(models_mod.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                calls.append(None)
+                return real_now(tz)
+
+        monkeypatch.setattr(models_mod, "datetime", SpyDatetime)
+        return calls
+
+    def test_pricing_report_timestamp_computed_per_instance(self, monkeypatch):
+        calls = self._spy(monkeypatch)
+        r1 = PricingReport()
+        r2 = PricingReport()
+        assert len(calls) == 2
+        assert r1.timestamp is not r2.timestamp
+
+    def test_sync_report_timestamp_computed_per_instance(self, monkeypatch):
+        from scryland.models import SyncReport
+
+        calls = self._spy(monkeypatch)
+        s1 = SyncReport()
+        s2 = SyncReport()
+        assert len(calls) == 2
+        assert s1.timestamp is not s2.timestamp
