@@ -14,6 +14,36 @@ from scryland.mythic_csv import MythicCard
 logger = logging.getLogger("scryland")
 
 
+def _resolve_best_match(all_matches: list[dict]) -> tuple[dict, int]:
+    """Pick the best-scoring candidate row from `all_matches` (non-empty).
+
+    A lone candidate is NOT promoted to score 3 ("safe to auto-add") just
+    for being the only match on the page — only an actual collector-number
+    match or exact-name match earns that tier. A single partial-name match
+    (score 1) must still fall through to the caller's non-safe path
+    (skip/manual), not get auto-added.
+    """
+    ordered = sorted(all_matches, key=lambda m: m["score"], reverse=True)
+    best = ordered[0]
+    return best, best["score"]
+
+
+def _is_plausible_price(text: str | None) -> bool:
+    """True if `text` (a price input's raw value) parses as a positive number.
+
+    Used to verify a Match-button click actually populated the price input,
+    since TCGPlayer's Match button unreliably updates it — an empty or
+    unchanged input after clicking Match must not be reported as success.
+    """
+    if not text:
+        return False
+    try:
+        value = float(text.replace("$", "").replace(",", "").strip())
+    except ValueError:
+        return False
+    return value > 0
+
+
 class AddInventoryPage:
     """Handles searching for cards and adding them to TCGPlayer inventory."""
 
@@ -386,14 +416,8 @@ class AddInventoryPage:
             all_matches.append({**r, "score": score})
 
         if all_matches:
-            all_matches.sort(key=lambda m: m["score"], reverse=True)
-            best = all_matches[0]
-            best_score = best["score"]
+            best, best_score = _resolve_best_match(all_matches)
             best_name = best["name"]
-
-            if len(all_matches) == 1:
-                best_score = max(best_score, 3)
-                logger.debug("Only one match found — treating as confirmed")
 
             if len(all_matches) > 1 and best_score < 3:
                 logger.info(
@@ -403,7 +427,10 @@ class AddInventoryPage:
                 )
 
             # Click by re-selecting the row via its position among action
-            # rows. A fresh query avoids stale handles after any re-render.
+            # rows. A fresh query avoids stale handles after any re-render —
+            # but a re-render between the row-extract evaluate above and
+            # this click evaluate could still shuffle rows, so re-verify the
+            # row's product name matches what we scored before clicking.
             target_action = "Manage" if best["hasManage"] else "Add"
             clicked = await retry_on_flaky(
                 lambda: self._page.evaluate(
@@ -422,6 +449,9 @@ class AddInventoryPage:
                             if (!action) continue;
                             if (counter === args.idx) {
                                 if (action.t !== args.target) return false;
+                                const tds = tr.querySelectorAll('td');
+                                const name = (tds[2] ? tds[2].innerText : '').trim();
+                                if (name !== args.name) return false;
                                 action.el.click();
                                 return true;
                             }
@@ -429,7 +459,7 @@ class AddInventoryPage:
                         }
                         return false;
                     }""",
-                    {"idx": best["idx"], "target": target_action},
+                    {"idx": best["idx"], "target": target_action, "name": best_name},
                 ),
                 page=self._page,
                 label=f"click {target_action} row {best['idx']}",
@@ -661,19 +691,33 @@ class AddInventoryPage:
 
                 if price_el:
                     new_val = await price_el.input_value()
-                    logger.info(
-                        "Clicked %s Match → price set to $%s",
+                    if _is_plausible_price(new_val):
+                        logger.info(
+                            "Clicked %s Match → price set to $%s",
+                            strategy_names.get(price_strategy, price_strategy),
+                            new_val,
+                        )
+                        return True
+                    logger.warning(
+                        "%s Match click did not produce a plausible price (value='%s') — "
+                        "falling back to manual fill",
                         strategy_names.get(price_strategy, price_strategy),
                         new_val,
                     )
-                return True
+                else:
+                    logger.warning(
+                        "No price input found after clicking %s Match — "
+                        "falling back to manual fill",
+                        strategy_names.get(price_strategy, price_strategy),
+                    )
             else:
                 logger.debug(
                     "No %s Match button found, falling back to CSV price",
                     strategy_names.get(price_strategy, price_strategy),
                 )
 
-        # Fallback: manually fill CSV price
+        # Fallback: manually fill CSV price (also reached when the Match
+        # click above didn't verifiably set a plausible price).
         price_handle = await row.evaluate_handle("""el => {
             const inputs = el.querySelectorAll('input[type="text"], input[type="number"]');
             for (const inp of inputs) {
@@ -682,14 +726,19 @@ class AddInventoryPage:
             return null;
         }""")
         price_el = price_handle.as_element()
-        if price_el:
-            await price_el.click(click_count=3)
-            await price_el.fill(f"{card.effective_price:.2f}")
-            logger.info("Set price to $%.2f (from CSV)", card.effective_price)
-        else:
+        if not price_el:
             logger.warning("No price input found for '%s'", target_condition)
             return False
 
+        await price_el.click(click_count=3)
+        await price_el.fill(f"{card.effective_price:.2f}")
+        confirmed = await price_el.input_value()
+        if not _is_plausible_price(confirmed):
+            logger.warning(
+                "Manual fill did not stick for '%s' (value='%s')", target_condition, confirmed
+            )
+            return False
+        logger.info("Set price to $%.2f (from CSV)", card.effective_price)
         return True
 
     async def is_already_listed(self, card: MythicCard) -> bool:
@@ -763,8 +812,8 @@ class AddInventoryPage:
                     if (cells.length < 2) continue;
                     if (cells[0].innerText.trim() !== targetCond) continue;
                     const text = cells[1].innerText.trim();
-                    const match = text.match(/\\$(\\d+\\.\\d+)/);
-                    return match ? parseFloat(match[1]) : null;
+                    const match = text.match(/\\$([\\d,]+\\.\\d+)/);
+                    return match ? parseFloat(match[1].replace(/,/g, '')) : null;
                 }
             }
             return null;
@@ -780,9 +829,9 @@ class AddInventoryPage:
     async def save(self) -> None:
         """Click Save on the manage page."""
         save_selectors = [
+            "input[value='Save']",
             "a:has-text('Save')",
             "button:has-text('Save')",
-            "input[value='Save']",
         ]
         for selector in save_selectors:
             save_btn = self._page.locator(selector).first
