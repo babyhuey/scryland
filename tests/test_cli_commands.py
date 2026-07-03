@@ -628,6 +628,165 @@ class TestListOnEbay:
         )
         assert result.exit_code == 0
 
+    def test_too_cheap_counted_as_skipped_not_failed(
+        self, runner, tmp_path, db_path, ebay_configured, mock_ebay, monkeypatch
+    ):
+        """The "too cheap" skip path is an intentional skip (below
+        --min-price, no undercut fallback), not an error — it must not
+        inflate the `failed` total."""
+        import csv
+
+        async def fake_find_card(self, name, set_name=None, collector_number=None):
+            return None
+
+        monkeypatch.setattr(
+            "scryland.ebay.scryfall.ScryfallClient.find_card",
+            fake_find_card,
+        )
+
+        csv_path = tmp_path / "cards.csv"
+        with open(csv_path, "w") as f:
+            w = csv.writer(f)
+            w.writerow(
+                [
+                    "Card Name",
+                    "Set Code",
+                    "Set Name",
+                    "Collector Number",
+                    "Rarity",
+                    "Language",
+                    "Quantity",
+                    "Condition",
+                    "Finish",
+                    "Altered",
+                    "Signed",
+                    "Misprint",
+                    "Price USD",
+                    "Price USD Foil",
+                    "Price USD Etched",
+                    "Scryfall ID",
+                ]
+            )
+            w.writerow(
+                [
+                    "Cheap Card",
+                    "M21",
+                    "Core Set 2021",
+                    "1",
+                    "common",
+                    "en",
+                    "1",
+                    "NM",
+                    "nonfoil",
+                    "false",
+                    "false",
+                    "false",
+                    "0.10",
+                    "0",
+                    "0",
+                    "abc",
+                ]
+            )
+
+        result = runner.invoke(
+            cli,
+            ["list-on-ebay", str(csv_path), "--no-undercut", "--min-price", "1.00"],
+        )
+        assert result.exit_code == 0
+        assert "0 listed" in result.output
+        assert "1 skipped" in result.output
+        assert "0 failed" in result.output
+
+
+class TestFastUpdateEbayPrice:
+    """Direct unit tests for the private _fast_update_ebay_price helper —
+    the list-on-ebay fast-update path for already-listed cards."""
+
+    def _make_card(self, price="2.49"):
+        from decimal import Decimal
+
+        from scryland.mythic_csv import MythicCard
+
+        return MythicCard(
+            card_name="Reprieve",
+            set_code="SOA",
+            set_name="Secrets of Strixhaven: Mystical Archive",
+            collector_number="9",
+            rarity="rare",
+            language="en",
+            quantity=1,
+            condition="NM",
+            finish="nonfoil",
+            altered=False,
+            signed=False,
+            misprint=False,
+            price_usd=Decimal(price),
+            price_usd_foil=Decimal("0"),
+            price_usd_etched=Decimal("0"),
+            scryfall_id="abc",
+        )
+
+    async def test_returns_new_price_not_old_price(self):
+        """The caller's summary row must show the price that was actually
+        applied, not the pre-update price it started from."""
+        from scryland.cli import _fast_update_ebay_price
+
+        card = self._make_card()
+        existing = {
+            "offer_id": "OFF1",
+            "sku": "SKU1",
+            "listing_id": "L1",
+            "product_name": "Reprieve",
+            "set_name": "Secrets of Strixhaven: Mystical Archive",
+            "collector_number": "9",
+            "condition": "Near Mint",
+            "is_foil": 0,
+            "price": 2.49,
+            "quantity": 1,
+        }
+        ebay_client = MagicMock()
+        ebay_client.find_lowest_price = AsyncMock(return_value=2.49)
+        ebay_client.update_offer_price = AsyncMock(return_value=True)
+        ebay_client._config = MagicMock(ebay_shipping_cost=0.99)
+        db = MagicMock()
+        console = MagicMock()
+
+        result = await _fast_update_ebay_price(
+            ebay_client, db, card, existing, True, 1.00, console
+        )
+
+        assert result == pytest.approx(1.49)
+        assert result != existing["price"]
+
+    async def test_returns_none_on_update_failure(self):
+        from scryland.cli import _fast_update_ebay_price
+
+        card = self._make_card()
+        existing = {
+            "offer_id": "OFF1",
+            "sku": "SKU1",
+            "listing_id": "L1",
+            "product_name": "Reprieve",
+            "set_name": "Secrets of Strixhaven: Mystical Archive",
+            "collector_number": "9",
+            "condition": "Near Mint",
+            "is_foil": 0,
+            "price": 2.49,
+            "quantity": 1,
+        }
+        ebay_client = MagicMock()
+        ebay_client.find_lowest_price = AsyncMock(return_value=2.49)
+        ebay_client.update_offer_price = AsyncMock(return_value=False)
+        ebay_client._config = MagicMock(ebay_shipping_cost=0.99)
+        db = MagicMock()
+        console = MagicMock()
+
+        result = await _fast_update_ebay_price(
+            ebay_client, db, card, existing, True, 1.00, console
+        )
+
+        assert result is None
+
 
 class TestAddInventoryDryRun:
     def test_dry_run(self, runner, tmp_path, db_path):
