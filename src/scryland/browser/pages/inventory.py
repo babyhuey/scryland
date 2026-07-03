@@ -125,8 +125,15 @@ class InventoryPage:
         for attempt in range(1, attempts + 1):
             checkbox_label = self._page.locator("text=My Inventory Only")
             if await checkbox_label.count() > 0:
+                # is_checked() must run on the actual <input>, not the label
+                # text locator — Playwright raises on a non-checkbox
+                # locator, and the previous code treated that raise as
+                # "unchecked", toggling an already-checked box off.
+                checkbox = self._page.locator("text=My Inventory Only >> input[type='checkbox']")
                 try:
-                    is_checked = await checkbox_label.is_checked()
+                    is_checked = (
+                        await checkbox.is_checked() if await checkbox.count() > 0 else False
+                    )
                 except Exception:
                     is_checked = False
                 if not is_checked:
@@ -234,19 +241,21 @@ class InventoryPage:
     async def click_manage_for_product(self, product_name: str) -> None:
         """Click the Manage button for a product, paginating until found.
 
-        Match tiers (first hit wins, per page):
-          1. Exact normalized equality.
+        Match tiers (best hit wins per page — all Manage rows are scored
+        first, then the highest tier is clicked, so a later exact match
+        isn't beaten by an earlier partial one):
+          1. Exact normalized equality (score 3).
           2. Same, after stripping a "<prefix>: " preamble from the cell
              (TCG labels some rows like "Mystical Archive: Reprieve"
-             while our stored name may just be "Reprieve").
+             while our stored name may just be "Reprieve") (score 2).
           3. Token-suffix: the cell's last N tokens equal the target's
              N tokens. Suffix (not substring) avoids false positives like
-             matching "Reprieve's Haunt" for target "reprieve".
+             matching "Reprieve's Haunt" for target "reprieve" (score 1).
         """
         max_pages = 100
         target_norm = _norm_name_for_match(product_name)
         for _ in range(max_pages):
-            clicked = await retry_on_flaky(
+            candidates = await retry_on_flaky(
                 lambda: self._page.evaluate(
                     """([targetNorm]) => {
                     const normBase = (s) => {
@@ -268,42 +277,70 @@ class InventoryPage:
                         return s.replace(/\\s+/g, ' ').trim();
                     };
                     const targetTokens = targetNorm.split(' ').filter(Boolean);
-                    const elements = document.querySelectorAll('a, button, input');
-                    for (const el of elements) {
+                    const results = [];
+                    let idx = 0;
+                    for (const el of document.querySelectorAll('a, button, input')) {
                         const text = (el.textContent || el.value || '').trim();
                         if (text !== 'Manage') continue;
+                        const manageIdx = idx;
+                        idx++;
                         const row = el.closest('tr');
                         if (!row) continue;
                         const cells = row.querySelectorAll('td');
                         const name = cells.length >= 3 ? cells[2].innerText.trim() : '';
                         const exact = normBase(name);
-                        if (exact === targetNorm) { el.click(); return true; }
-                        const stripped = normStripPrefix(name);
-                        if (stripped === targetNorm) { el.click(); return true; }
-                        // Tier 3: token-suffix match on the base-normalized name.
-                        const cellTokens = exact.split(' ').filter(Boolean);
-                        if (targetTokens.length > 0 && cellTokens.length >= targetTokens.length) {
-                            let ok = true;
-                            const offset = cellTokens.length - targetTokens.length;
-                            for (let i = 0; i < targetTokens.length; i++) {
-                                if (cellTokens[offset + i] !== targetTokens[i]) { ok = false; break; }
+                        let score = 0;
+                        if (exact === targetNorm) {
+                            score = 3;
+                        } else if (normStripPrefix(name) === targetNorm) {
+                            score = 2;
+                        } else {
+                            const cellTokens = exact.split(' ').filter(Boolean);
+                            if (targetTokens.length > 0 && cellTokens.length >= targetTokens.length) {
+                                let ok = true;
+                                const offset = cellTokens.length - targetTokens.length;
+                                for (let i = 0; i < targetTokens.length; i++) {
+                                    if (cellTokens[offset + i] !== targetTokens[i]) { ok = false; break; }
+                                }
+                                if (ok) score = 1;
                             }
-                            if (ok) { el.click(); return true; }
                         }
+                        if (score > 0) results.push({idx: manageIdx, score});
                     }
-                    return false;
+                    return results;
                 }""",
                     [target_norm],
                 ),
                 page=self._page,
-                label=f"click_manage_for_product({product_name!r})",
+                label=f"click_manage_for_product scan ({product_name!r})",
             )
-            if clicked:
-                try:
-                    await self._page.wait_for_load_state("networkidle", timeout=15000)
-                except Exception:
-                    pass
-                return
+
+            if candidates:
+                candidates.sort(key=lambda c: c["score"], reverse=True)
+                best_idx = candidates[0]["idx"]
+                clicked = await retry_on_flaky(
+                    lambda best_idx=best_idx: self._page.evaluate(
+                        """(idx) => {
+                        let counter = 0;
+                        for (const el of document.querySelectorAll('a, button, input')) {
+                            const text = (el.textContent || el.value || '').trim();
+                            if (text !== 'Manage') continue;
+                            if (counter === idx) { el.click(); return true; }
+                            counter++;
+                        }
+                        return false;
+                    }""",
+                        best_idx,
+                    ),
+                    page=self._page,
+                    label=f"click_manage_for_product click ({product_name!r})",
+                )
+                if clicked:
+                    try:
+                        await self._page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        pass
+                    return
 
             nxt = await click_next_page(self._page)
             if nxt is NextPageResult.LAST_PAGE:
@@ -318,11 +355,17 @@ class InventoryPage:
     async def verify_product_absent(self, product_name: str) -> bool:
         """Positive-signal check: True iff the product is genuinely absent.
 
-        Uses the inventory search box to query by the card's normalized
-        name, then counts Manage buttons on the first page of results.
-        Zero Manage buttons = genuinely absent. Any result rows = present
-        under some label (don't trust the caller's "not found" claim).
-        Returns False on any error so the caller stays conservative.
+        Uses the inventory search box to query by the card's raw name, then
+        counts Manage buttons on the first page of results. Zero Manage
+        buttons = genuinely absent. Any result rows = present under some
+        label (don't trust the caller's "not found" claim). Returns False
+        on any error so the caller stays conservative.
+
+        Note: the punctuation-stripped normalized name is used only for
+        the emptiness guard below, never for the search itself — searching
+        with the normalized form (e.g. "jace vryn s prodigy") can return
+        zero results even when the product IS listed under its real name,
+        which would invert this safety check.
         """
         target_norm = _norm_name_for_match(product_name)
         if not target_norm:
@@ -335,7 +378,7 @@ class InventoryPage:
                 search_input = self._page.locator(Selectors.SEARCH_INPUT)
                 if await search_input.count() == 0:
                     return False
-            await search_input.fill(target_norm)
+            await search_input.fill(product_name)
             search_btn = self._page.locator(Selectors.SEARCH_BUTTON)
             await search_btn.click()
             await self._page.wait_for_load_state("networkidle", timeout=15000)
