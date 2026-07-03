@@ -464,6 +464,53 @@ class TestSyncTransactionSafety:
         assert row["status"] == "active"
 
 
+class TestMarkInventorySoldPrecision:
+    """_mark_inventory_sold must not over-match: exact name (case-insensitive),
+    constrained by condition/finish when known — not a `%name%` substring
+    scan across every condition/finish of a card."""
+
+    def test_nm_sale_does_not_mark_other_conditions_sold(self, db):
+        db.sync(
+            [
+                _make_listing(product_name="Sol Ring", condition="Near Mint"),
+                _make_listing(product_name="Sol Ring", condition="Lightly Played"),
+                _make_listing(product_name="Sol Ring", condition="Near Mint Foil"),
+            ]
+        )
+        db.record_order_sales(
+            [{"order_number": "ORD-1", "product_name": "Sol Ring", "condition": "Near Mint"}]
+        )
+        rows = {
+            r["condition"]: r["status"]
+            for r in db.conn.execute(
+                "SELECT condition, status FROM inventory WHERE product_name = 'Sol Ring'"
+            ).fetchall()
+        }
+        assert rows["Near Mint"] == "sold"
+        assert rows["Lightly Played"] == "active"
+        assert rows["Near Mint Foil"] == "active"
+
+    def test_island_sale_does_not_mark_island_of_wak_wak(self, db):
+        db.sync(
+            [
+                _make_listing(product_name="Island", condition="Near Mint"),
+                _make_listing(product_name="Island of Wak-Wak", condition="Near Mint"),
+            ]
+        )
+        db.record_order_sales(
+            [{"order_number": "ORD-2", "product_name": "Island", "condition": "Near Mint"}]
+        )
+        rows = {
+            r["product_name"]: r["status"]
+            for r in db.conn.execute(
+                "SELECT product_name, status FROM inventory "
+                "WHERE product_name IN ('Island', 'Island of Wak-Wak')"
+            ).fetchall()
+        }
+        assert rows["Island"] == "sold"
+        assert rows["Island of Wak-Wak"] == "active"
+
+
 class TestFindInventoryByCanonicalIncludeRemoved:
     def test_active_found_without_flag(self, db):
         from scryland.db import canonical_key
