@@ -207,6 +207,46 @@ class TestWatchEbayOnlySweeps:
         assert result.exit_code in (0, 1)
         assert prompt_mock.call_count <= 1
 
+    def test_empty_passphrase_answer_reprompts_then_caches(
+        self,
+        runner,
+        db_path,
+        monkeypatch,
+    ):
+        """An empty answer to the startup passphrase prompt must not be
+        cached as 'resolved' — the guard `not config.ebay_passphrase` would
+        then re-prompt on every iteration. Re-prompt until non-empty, then
+        cache: exactly 2 prompt calls here, none in later iterations."""
+        monkeypatch.setenv("SCRYLAND_EBAY_APP_ID", "APP")
+        monkeypatch.setenv("SCRYLAND_EBAY_CERT_ID", "CERT")
+        monkeypatch.setenv("SCRYLAND_EBAY_DEV_ID", "DEV")
+        monkeypatch.setenv("SCRYLAND_EBAY_REDIRECT_URI_NAME", "RU")
+        monkeypatch.setenv("SCRYLAND_EBAY_SELLER_USERNAME", "me")
+        monkeypatch.setenv("SCRYLAND_EBAY_PASSPHRASE", "")
+
+        self._mock_deps(monkeypatch)
+
+        from rich.prompt import Prompt
+
+        prompt_mock = MagicMock(side_effect=["", "secret"])
+        monkeypatch.setattr(Prompt, "ask", prompt_mock)
+
+        import asyncio as _aio
+
+        orig = _aio.sleep
+        call = {"n": 0}
+
+        async def fake(s):
+            call["n"] += 1
+            if call["n"] >= 2:
+                raise KeyboardInterrupt()
+            await orig(0)
+
+        monkeypatch.setattr(_aio, "sleep", fake)
+        result = runner.invoke(cli, ["watch", "--ebay-only", "-i", "9999"])
+        assert result.exit_code in (0, 1)
+        assert prompt_mock.call_count == 2
+
     def test_browse_errors_surfaced(
         self,
         runner,

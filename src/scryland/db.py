@@ -365,7 +365,13 @@ class InventoryDB:
         return row is not None
 
     def is_sold(self, product_name: str, condition: str, finish: str = "") -> bool:
-        """Check if a card was sold/removed."""
+        """Check if a card was sold/removed.
+
+        NOTE: currently unused. Retains un-normalized exact-match condition
+        semantics — unlike is_known/is_listed it does NOT strip an embedded
+        'Foil' token, so it won't match rows sync() stored as e.g.
+        "Near Mint Foil". Normalize like its siblings before reviving.
+        """
         row = self.conn.execute(
             "SELECT id FROM inventory "
             "WHERE product_name = ? AND condition = ? AND finish = ? AND status = 'sold'",

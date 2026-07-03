@@ -2699,8 +2699,12 @@ def watch(
             # and cache it on `config`. _ebay_watch_pass calls
             # _ebay_passphrase(config) every iteration; without this it
             # would prompt (and block) on the first sweep of every run.
+            # Re-prompt on an empty answer — caching "" would defeat the
+            # `not config.ebay_passphrase` guard and re-prompt every sweep.
             if (ebay or ebay_only) and config.ebay_app_id and not config.ebay_passphrase:
-                resolved_passphrase = _ebay_passphrase(config)
+                resolved_passphrase = ""
+                while not resolved_passphrase:
+                    resolved_passphrase = _ebay_passphrase(config)
                 config = config.model_copy(update={"ebay_passphrase": resolved_passphrase})
 
             run_count = 0
