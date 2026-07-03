@@ -54,12 +54,17 @@ async def _fast_update_ebay_price(
     undercut: bool,
     min_price: float,
     console,
-) -> bool:
+) -> float | None:
     """Update an already-listed eBay offer's price without republishing.
 
     Skips Scryfall lookup, inventory_item PUT, and publish — ~5x faster than
     the full list-on-ebay pipeline. Also upserts the new price into the local
     ebay_listings table. Use when card data hasn't changed, only the price.
+
+    Returns the price that ended up applied (existing price if unchanged),
+    or None if the update failed. Callers must check `is not None`, not
+    truthiness — a returned price is never 0 but that's not guaranteed by
+    the type alone.
     """
     import logging
 
@@ -119,7 +124,7 @@ async def _fast_update_ebay_price(
     current_price = existing.get("price") or 0
     if abs(price - current_price) < 0.01:
         console.print(f"  [dim]Price unchanged at ${current_price:.2f} — skip[/dim]")
-        return True
+        return current_price
 
     ok = await ebay_client.update_offer_price(
         existing["offer_id"],
@@ -128,7 +133,7 @@ async def _fast_update_ebay_price(
     )
     if not ok:
         console.print("  [red]Fast update failed — try --full-republish[/red]")
-        return False
+        return None
 
     db.upsert_ebay_listing(
         sku=existing["sku"],
@@ -147,7 +152,7 @@ async def _fast_update_ebay_price(
         f"  [green]Updated ${current_price:.2f} → ${price:.2f}[/green] "
         f"[dim](fast path — no republish)[/dim]"
     )
-    return True
+    return price
 
 
 async def _end_tcg_listing_by_canonical(session, config, db, canonical_key: str) -> bool:
@@ -4616,7 +4621,7 @@ def list_on_ebay(
                         )
                         continue
                     if fast_update and not draft and existing.get("offer_id"):
-                        ok = await _fast_update_ebay_price(
+                        new_price = await _fast_update_ebay_price(
                             ebay,
                             db,
                             card,
@@ -4625,13 +4630,13 @@ def list_on_ebay(
                             min_price,
                             console,
                         )
-                        if ok:
+                        if new_price is not None:
                             listed += 1
                             results.append(
                                 {
                                     "card": card,
                                     "status": "price updated",
-                                    "price": existing.get("price"),
+                                    "price": new_price,
                                     "listing_id": existing.get("listing_id"),
                                 }
                             )
@@ -4685,7 +4690,7 @@ def list_on_ebay(
                                 f"${min_price:.2f} and no eBay matches — "
                                 f"skipping[/yellow]"
                             )
-                            failed += 1
+                            skipped += 1
                             results.append(
                                 {
                                     "card": card,
@@ -4730,7 +4735,7 @@ def list_on_ebay(
                             f"  [yellow]CSV ${csv_price:.2f} below min "
                             f"${min_price:.2f} and --no-undercut — skipping[/yellow]"
                         )
-                        failed += 1
+                        skipped += 1
                         results.append(
                             {
                                 "card": card,
