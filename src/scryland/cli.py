@@ -2647,6 +2647,7 @@ def watch(
     logger = ctx.obj["logger"]
 
     async def _run() -> None:
+        nonlocal config
         import time
         from datetime import datetime
 
@@ -2672,6 +2673,14 @@ def watch(
                 f"\n[bold]Watching prices every {interval} minutes "
                 f"in {mode} mode. Press Ctrl+C to stop.[/bold]"
             )
+
+            # Resolve the eBay passphrase once for the whole watch process
+            # and cache it on `config`. _ebay_watch_pass calls
+            # _ebay_passphrase(config) every iteration; without this it
+            # would prompt (and block) on the first sweep of every run.
+            if (ebay or ebay_only) and config.ebay_app_id and not config.ebay_passphrase:
+                resolved_passphrase = _ebay_passphrase(config)
+                config = config.model_copy(update={"ebay_passphrase": resolved_passphrase})
 
             run_count = 0
             # Cumulative stats across iterations — printed in each summary.

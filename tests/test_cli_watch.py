@@ -165,6 +165,48 @@ class TestWatchEbayOnlySweeps:
         result = runner.invoke(cli, ["watch", "--ebay-only", "-i", "9999"])
         assert result.exit_code in (0, 1)
 
+    def test_prompts_for_passphrase_at_most_once_across_iterations(
+        self,
+        runner,
+        db_path,
+        monkeypatch,
+    ):
+        """Without SCRYLAND_EBAY_PASSPHRASE set, the passphrase prompt must
+        be resolved once at watch startup and cached for the process — not
+        re-prompted (and blocking) on every sweep iteration."""
+        monkeypatch.setenv("SCRYLAND_EBAY_APP_ID", "APP")
+        monkeypatch.setenv("SCRYLAND_EBAY_CERT_ID", "CERT")
+        monkeypatch.setenv("SCRYLAND_EBAY_DEV_ID", "DEV")
+        monkeypatch.setenv("SCRYLAND_EBAY_REDIRECT_URI_NAME", "RU")
+        monkeypatch.setenv("SCRYLAND_EBAY_SELLER_USERNAME", "me")
+        # Explicit empty value (not delenv) so this doesn't fall through to
+        # a real .env file's passphrase in dev checkouts — env vars take
+        # priority over .env regardless of value.
+        monkeypatch.setenv("SCRYLAND_EBAY_PASSPHRASE", "")
+
+        self._mock_deps(monkeypatch)
+
+        from rich.prompt import Prompt
+
+        prompt_mock = MagicMock(return_value="secret")
+        monkeypatch.setattr(Prompt, "ask", prompt_mock)
+
+        import asyncio as _aio
+
+        orig = _aio.sleep
+        call = {"n": 0}
+
+        async def fake(s):
+            call["n"] += 1
+            if call["n"] >= 2:
+                raise KeyboardInterrupt()
+            await orig(0)
+
+        monkeypatch.setattr(_aio, "sleep", fake)
+        result = runner.invoke(cli, ["watch", "--ebay-only", "-i", "9999"])
+        assert result.exit_code in (0, 1)
+        assert prompt_mock.call_count <= 1
+
     def test_browse_errors_surfaced(
         self,
         runner,
