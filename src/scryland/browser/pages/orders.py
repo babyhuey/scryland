@@ -66,7 +66,7 @@ class OrdersPage:
                 const results = [];
                 for (const row of rows) {
                     const cells = row.querySelectorAll('td');
-                    if (cells.length < 8) continue;
+                    if (cells.length < 9) continue;
 
                     const orderLink = cells[1]?.querySelector('a');
                     const orderNumber = orderLink ? orderLink.textContent.trim() : '';
