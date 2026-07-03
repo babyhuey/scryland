@@ -431,3 +431,96 @@ class TestCrossDelistAlwaysFires:
         """Sanity check: delist also fires when record_order_sales returns 1."""
         mock_delist = await _run_ebay_watch_pass(record_order_sales_return=1)
         mock_delist.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Bug: the eBay-orders sweep re-marked a manually re-published listing
+# "sold" on every subsequent sweep, since mark_ebay_listing_status(sku,
+# "sold") ran unconditionally for every SKU in every recent order.
+# ---------------------------------------------------------------------------
+
+
+async def _run_real_db_ebay_watch_pass(db, order: dict) -> None:
+    """Like _run_ebay_watch_pass but against a real InventoryDB, so
+    ebay_listings.status changes are actually observable."""
+    import scryland.cli as cli_module
+
+    config = MagicMock()
+    config.ebay_shipping_cost = 3.99
+    logger = MagicMock()
+
+    mock_auth = AsyncMock()
+    mock_auth.access_token = AsyncMock(return_value="fake-token")
+
+    mock_orders_ctx = AsyncMock()
+    mock_orders_ctx.__aenter__ = AsyncMock(return_value=mock_orders_ctx)
+    mock_orders_ctx.__aexit__ = AsyncMock(return_value=False)
+    mock_orders_ctx.iter_recent_orders = AsyncMock(return_value=[order])
+
+    mock_delist = AsyncMock(return_value=True)
+
+    # Real client — active listings go through the undercut sweep (step 3)
+    # for real once the fix stops leaving them permanently 'sold'. Return
+    # None from find_lowest_price so that sweep is a no-op.
+    client_inst = MagicMock()
+    client_inst.__aenter__ = AsyncMock(return_value=client_inst)
+    client_inst.__aexit__ = AsyncMock(return_value=None)
+    client_inst.get_own_seller_username = AsyncMock(return_value="me")
+    client_inst.find_lowest_price = AsyncMock(return_value=None)
+    client_inst.withdraw_offer = AsyncMock(return_value=True)
+    client_inst.update_offer_price = AsyncMock(return_value=True)
+
+    mock_ebay_auth_mod = MagicMock()
+    mock_ebay_auth_mod.EbayAuth = MagicMock(return_value=mock_auth)
+    mock_ebay_client_mod = MagicMock()
+    mock_ebay_client_mod.EbayClient = MagicMock(return_value=client_inst)
+    mock_ebay_orders_mod = MagicMock()
+    mock_ebay_orders_mod.EbayOrdersClient = MagicMock(return_value=mock_orders_ctx)
+    mock_ebay_orders_mod.order_to_sales_rows = order_to_sales_rows
+
+    with (
+        patch.object(cli_module, "_ebay_passphrase", return_value=None),
+        patch.object(cli_module, "_end_tcg_listing_by_canonical", mock_delist),
+        patch.dict(
+            "sys.modules",
+            {
+                "scryland.ebay.auth": mock_ebay_auth_mod,
+                "scryland.ebay.client": mock_ebay_client_mod,
+                "scryland.ebay.orders": mock_ebay_orders_mod,
+            },
+        ),
+    ):
+        await cli_module._ebay_watch_pass(config, db, session=None, logger=logger)
+
+
+class TestEbayOrdersDoNotReMarkRepublishedListingSold:
+    async def test_second_sweep_over_same_order_preserves_republished_status(self, db):
+        db.upsert_ebay_listing(
+            sku="MY-SKU",
+            offer_id="O1",
+            listing_id="L1",
+            product_name="Reprieve SOA #9",
+            set_name="",
+            collector_number="",
+            condition="Near Mint",
+            is_foil=False,
+            price=2.0,
+            quantity=1,
+            status="active",
+        )
+        order = _make_order(sku="MY-SKU")
+
+        # First sweep: the sale is new -> our listing gets marked sold.
+        await _run_real_db_ebay_watch_pass(db, order)
+        listing = db.get_ebay_listings(status=None)[0]
+        assert listing["status"] == "sold"
+
+        # Seller manually re-publishes on eBay; local record reflects that.
+        db.mark_ebay_listing_status("MY-SKU", "active")
+
+        # Second sweep over the SAME order (still "recent" per the API) —
+        # the sale is already recorded, so re-marking sold must not repeat
+        # and flip the re-published listing back to sold.
+        await _run_real_db_ebay_watch_pass(db, order)
+        listing = db.get_ebay_listings(status=None)[0]
+        assert listing["status"] == "active"

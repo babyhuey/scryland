@@ -730,6 +730,20 @@ class InventoryDB:
         self.conn.commit()
         return True
 
+    def is_sale_recorded(
+        self, order_number: str, product_name: str, condition: str = "", marketplace: str = "tcgplayer"
+    ) -> bool:
+        """Return True if this order+product+condition+marketplace sale is
+        already stored. Lets a caller distinguish "just recorded this sweep"
+        from "already known" before doing a one-time side effect (e.g.
+        marking a listing sold) that shouldn't repeat on every sweep."""
+        row = self.conn.execute(
+            "SELECT id FROM sales WHERE order_number = ? AND product_name = ? "
+            "AND condition = ? AND marketplace = ?",
+            (order_number, product_name, condition, marketplace),
+        ).fetchone()
+        return row is not None
+
     def record_order_sales(self, sales: list[dict]) -> int:
         """Atomically record every product sold in a single order.
 
