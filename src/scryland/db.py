@@ -281,7 +281,9 @@ class InventoryDB:
             updates = {
                 "quantity": listing.quantity,
                 "current_price": float(listing.current_price),
-                "tcg_low_price": float(listing.tcg_low_price) if listing.tcg_low_price else None,
+                "tcg_low_price": (
+                    float(listing.tcg_low_price) if listing.tcg_low_price is not None else None
+                ),
                 "market_price": float(listing.market_price) if listing.market_price else None,
                 "last_seen": now,
                 "status": "active",
@@ -303,7 +305,8 @@ class InventoryDB:
 
             self.conn.execute(
                 "UPDATE inventory SET "
-                "product_name=?, quantity=?, current_price=?, tcg_low_price=?, market_price=?, "
+                "product_name=?, quantity=?, current_price=?, "
+                "tcg_low_price=COALESCE(?, tcg_low_price), market_price=?, "
                 "last_seen=?, status=?, set_name=?, last_price_change=COALESCE(?, last_price_change) "
                 "WHERE id=?",
                 (
@@ -334,7 +337,7 @@ class InventoryDB:
                     finish,
                     listing.quantity,
                     float(listing.current_price),
-                    float(listing.tcg_low_price) if listing.tcg_low_price else None,
+                    float(listing.tcg_low_price) if listing.tcg_low_price is not None else None,
                     float(listing.market_price) if listing.market_price else None,
                     listing.tcgplayer_id,
                     now,
@@ -425,7 +428,7 @@ class InventoryDB:
                 listing.product_name,
                 listing.condition,
                 float(listing.current_price),
-                float(listing.tcg_low_price) if listing.tcg_low_price else None,
+                float(listing.tcg_low_price) if listing.tcg_low_price is not None else None,
                 float(listing.market_price) if listing.market_price else None,
                 now,
             ),

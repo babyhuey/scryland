@@ -473,6 +473,66 @@ class TestFalsyZeroPriceTracking:
         assert report.price_changed[0]["new_price"] == pytest.approx(1.50)
 
 
+class TestTcgLowPriceFalsyZeroAndPreserve:
+    """`float(x) if x else None` treats Decimal("0") as missing, and a
+    plain UPDATE overwrites a known tcg_low_price with NULL when a later
+    scrape lacks it."""
+
+    def test_zero_price_stored_as_zero_not_null_on_insert(self, db):
+        listing = _make_listing(
+            product_name="Bolt", condition="Near Mint", tcg_low_price=Decimal("0")
+        )
+        db.upsert_listing(listing, "")
+        db.conn.commit()
+        row = db.conn.execute(
+            "SELECT tcg_low_price FROM inventory WHERE product_name = 'Bolt'"
+        ).fetchone()
+        assert row["tcg_low_price"] == pytest.approx(0.0)
+
+    def test_zero_price_stored_as_zero_not_null_on_update(self, db):
+        listing = _make_listing(
+            product_name="Bolt", condition="Near Mint", tcg_low_price=Decimal("1.00")
+        )
+        db.upsert_listing(listing, "")
+        db.conn.commit()
+
+        repriced = _make_listing(
+            product_name="Bolt", condition="Near Mint", tcg_low_price=Decimal("0")
+        )
+        db.upsert_listing(repriced, "")
+        row = db.conn.execute(
+            "SELECT tcg_low_price FROM inventory WHERE product_name = 'Bolt'"
+        ).fetchone()
+        assert row["tcg_low_price"] == pytest.approx(0.0)
+
+    def test_update_with_none_preserves_prior_tcg_low_price(self, db):
+        listing = _make_listing(
+            product_name="Bolt", condition="Near Mint", tcg_low_price=Decimal("2.50")
+        )
+        db.upsert_listing(listing, "")
+        db.conn.commit()
+
+        rescraped = _make_listing(
+            product_name="Bolt", condition="Near Mint", tcg_low_price=None
+        )
+        db.upsert_listing(rescraped, "")
+        row = db.conn.execute(
+            "SELECT tcg_low_price FROM inventory WHERE product_name = 'Bolt'"
+        ).fetchone()
+        assert row["tcg_low_price"] == pytest.approx(2.50)
+
+    def test_record_price_stores_zero_tcg_low_not_null(self, db):
+        listing = _make_listing(
+            product_name="Bolt", condition="Near Mint", tcg_low_price=Decimal("0")
+        )
+        db.record_price(listing)
+        db.conn.commit()
+        row = db.conn.execute(
+            "SELECT tcg_low FROM price_history WHERE product_name = 'Bolt'"
+        ).fetchone()
+        assert row["tcg_low"] == pytest.approx(0.0)
+
+
 class TestIsListedFuzzyLikeEscape:
     def test_underscore_in_name_does_not_match_wildcard(self, db):
         """A card name with _ should not match a card with a different character there."""
