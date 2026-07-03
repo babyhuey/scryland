@@ -336,6 +336,37 @@ class TestUpdateTcgPrice:
         assert row["current_price"] == pytest.approx(2.00)
 
 
+class TestIsSaleRecorded:
+    def test_false_before_recording(self, db):
+        assert db.is_sale_recorded("ORD-1", "Bolt", "Near Mint", "ebay") is False
+
+    def test_true_after_recording(self, db):
+        db.record_order_sales(
+            [
+                {
+                    "order_number": "ORD-1",
+                    "product_name": "Bolt",
+                    "condition": "Near Mint",
+                    "_marketplace": "ebay",
+                }
+            ]
+        )
+        assert db.is_sale_recorded("ORD-1", "Bolt", "Near Mint", "ebay") is True
+
+    def test_scoped_to_marketplace(self, db):
+        db.record_order_sales(
+            [
+                {
+                    "order_number": "ORD-1",
+                    "product_name": "Bolt",
+                    "condition": "Near Mint",
+                    "_marketplace": "tcgplayer",
+                }
+            ]
+        )
+        assert db.is_sale_recorded("ORD-1", "Bolt", "Near Mint", "ebay") is False
+
+
 class TestInsertSaleRowMarketplaceDedup:
     def test_same_order_different_marketplace_both_recorded(self, db):
         """TCG and eBay sales for the same order/card must both be stored."""

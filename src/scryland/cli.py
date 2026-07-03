@@ -470,9 +470,24 @@ async def _ebay_watch_pass(
     tcg_delist_failed = 0
     for order in orders:
         rows = order_to_sales_rows(order)
+        # Snapshot which rows are already known *before* recording this
+        # order — record_order_sales only returns an aggregate count, not
+        # per-row detail, but marking our listing "sold" must only happen
+        # the sweep it's newly recorded. Otherwise a listing the seller
+        # manually re-published gets flipped back to "sold" every sweep
+        # this order is still "recent" per the API.
+        already_recorded = [
+            db.is_sale_recorded(
+                row["order_number"],
+                row["product_name"],
+                row.get("condition", ""),
+                row.get("_marketplace") or "tcgplayer",
+            )
+            for row in rows
+        ]
         n = db.record_order_sales(rows)
         new_ebay_sales += n
-        for row in rows:
+        for row, was_already_recorded in zip(rows, already_recorded, strict=True):
             sku = row.get("_sku")
             if not sku:
                 continue
@@ -491,7 +506,8 @@ async def _ebay_watch_pass(
                 )
                 continue
             key = ebay_listing["canonical_key"]
-            db.mark_ebay_listing_status(sku, "sold")
+            if not was_already_recorded:
+                db.mark_ebay_listing_status(sku, "sold")
             # Cross-delist on TCG — attempt for every SKU regardless of whether
             # this order was already recorded (idempotent; reconciliation
             # also covers this, but inline is cheaper).
