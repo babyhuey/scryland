@@ -215,14 +215,18 @@ class InventoryDB:
         """
         # Fuzzy match inventory.product_name ↔ sales.product_name because
         # TCG names include parentheticals that the orders page strips.
+        # Both names are escaped before being embedded in a LIKE pattern —
+        # otherwise a literal '%' or '_' in a card name acts as a wildcard
+        # and over-matches, hiding rows that should be reclassified.
+        escape_expr = "REPLACE(REPLACE(REPLACE({col}, '\\', '\\\\'), '%', '\\%'), '_', '\\_')"
         cur = self.conn.execute(
             "UPDATE inventory SET status = 'removed' "
             "WHERE status = 'sold' "
             "AND NOT EXISTS ("
             "  SELECT 1 FROM sales "
             "  WHERE sales.product_name = inventory.product_name "
-            "     OR sales.product_name LIKE '%' || inventory.product_name || '%' "
-            "     OR inventory.product_name LIKE '%' || sales.product_name || '%' "
+            f"     OR sales.product_name LIKE '%' || {escape_expr.format(col='inventory.product_name')} || '%' ESCAPE '\\' "
+            f"     OR inventory.product_name LIKE '%' || {escape_expr.format(col='sales.product_name')} || '%' ESCAPE '\\' "
             ")"
         )
         if cur.rowcount:

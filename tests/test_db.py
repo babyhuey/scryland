@@ -658,3 +658,35 @@ class TestFindInventoryByCanonicalIncludeRemoved:
         db.conn.commit()
         key = canonical_key("Fireball", "Near Mint", False)
         assert db.find_inventory_by_canonical(key, include_removed=True) is not None
+
+
+class TestReclassifyFalseSoldLikeEscape:
+    """_reclassify_false_sold concatenates product names into a LIKE
+    pattern without escaping '%'/'_' — a name containing '%' turns into a
+    wildcard, over-matching a sale that doesn't really correspond and
+    incorrectly leaving the row 'sold' instead of reclassifying it."""
+
+    def test_percent_in_name_does_not_over_match(self, db):
+        now = "2026-01-01T00:00:00"
+        db.conn.execute(
+            "INSERT INTO inventory (product_name, condition, finish, status, "
+            "current_price, quantity, first_seen, last_seen) "
+            "VALUES ('100% Foil Promo', 'Near Mint', '', 'sold', 1.00, 1, ?, ?)",
+            (now, now),
+        )
+        # Does NOT literally contain "100% Foil Promo" — would only match
+        # if the '%' in the inventory name were (incorrectly) treated as a
+        # SQL wildcard instead of a literal character.
+        db.conn.execute(
+            "INSERT INTO sales (order_number, order_date, product_name, condition, recorded_at) "
+            "VALUES ('X', ?, '100XXXXXX Foil Promo', 'Near Mint', ?)",
+            (now, now),
+        )
+        db.conn.commit()
+
+        db._reclassify_false_sold()
+
+        row = db.conn.execute(
+            "SELECT status FROM inventory WHERE product_name = '100% Foil Promo'"
+        ).fetchone()
+        assert row["status"] == "removed"
