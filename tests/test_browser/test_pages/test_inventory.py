@@ -140,3 +140,87 @@ class TestClickManageForProduct:
 
         click_call = page.evaluate.call_args_list[1]
         assert click_call.args[1] == 2
+
+
+class TestApplyMyInventoryFilter:
+    def _locator_factory(self, checkbox_label, checkbox, search_btn):
+        def locator(selector):
+            if selector == "text=My Inventory Only":
+                return checkbox_label
+            if selector == "text=My Inventory Only >> input[type='checkbox']":
+                return checkbox
+            return search_btn
+
+        return locator
+
+    @pytest.mark.asyncio
+    async def test_does_not_toggle_an_already_checked_box(self, config):
+        # Regression test: is_checked() used to run on the label locator
+        # itself, which Playwright can't check, so it always raised, was
+        # swallowed, and defaulted to "unchecked" — clicking (and thus
+        # toggling off) an already-checked box every time.
+        page = MagicMock()
+        checkbox_label = AsyncMock()
+        checkbox_label.count = AsyncMock(return_value=1)
+        checkbox = AsyncMock()
+        checkbox.count = AsyncMock(return_value=1)
+        checkbox.is_checked = AsyncMock(return_value=True)
+        search_btn = AsyncMock()
+
+        page.locator = MagicMock(
+            side_effect=self._locator_factory(checkbox_label, checkbox, search_btn)
+        )
+        page.wait_for_load_state = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+        page.evaluate = AsyncMock(return_value=[5, 0])  # manage=5, add=0 → filter applied
+
+        inv = InventoryPage(page, config)
+        await inv._apply_my_inventory_filter()
+
+        checkbox_label.click.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_clicks_when_checkbox_is_unchecked(self, config):
+        page = MagicMock()
+        checkbox_label = AsyncMock()
+        checkbox_label.count = AsyncMock(return_value=1)
+        checkbox = AsyncMock()
+        checkbox.count = AsyncMock(return_value=1)
+        checkbox.is_checked = AsyncMock(return_value=False)
+        search_btn = AsyncMock()
+
+        page.locator = MagicMock(
+            side_effect=self._locator_factory(checkbox_label, checkbox, search_btn)
+        )
+        page.wait_for_load_state = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+        page.evaluate = AsyncMock(return_value=[5, 0])
+
+        inv = InventoryPage(page, config)
+        await inv._apply_my_inventory_filter()
+
+        checkbox_label.click.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_unchecked_when_checkbox_locator_missing(self, config):
+        # The existing exception fallback should now rarely fire, but must
+        # still behave safely (assume unchecked) when the checkbox truly
+        # can't be found.
+        page = MagicMock()
+        checkbox_label = AsyncMock()
+        checkbox_label.count = AsyncMock(return_value=1)
+        checkbox = AsyncMock()
+        checkbox.count = AsyncMock(return_value=0)
+        search_btn = AsyncMock()
+
+        page.locator = MagicMock(
+            side_effect=self._locator_factory(checkbox_label, checkbox, search_btn)
+        )
+        page.wait_for_load_state = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+        page.evaluate = AsyncMock(return_value=[5, 0])
+
+        inv = InventoryPage(page, config)
+        await inv._apply_my_inventory_filter()
+
+        checkbox_label.click.assert_awaited_once()
