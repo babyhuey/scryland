@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, Field, computed_field
 
 
 class UpdateStatus(StrEnum):
@@ -84,14 +84,14 @@ class PricingReport(BaseModel):
     updates_rejected: int = 0
     updates_failed: int = 0
     dry_run: bool = False
-    timestamp: datetime = datetime.now(UTC)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updates: list[PriceUpdate] = []
 
 
 class SyncReport(BaseModel):
     """Summary of an inventory sync operation."""
 
-    timestamp: datetime = datetime.now(UTC)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     total_active: int = 0
     added: list[str] = []
     removed: list[str] = []
