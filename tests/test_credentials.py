@@ -40,6 +40,29 @@ class TestSaveAndLoad:
         assert oct(cred_stat.st_mode)[-3:] == "600"
         assert oct(salt_stat.st_mode)[-3:] == "600"
 
+    def test_files_created_atomically_at_0600(self, monkeypatch):
+        """write_bytes() then chmod(0o600) leaves a brief default-perms
+        window between file creation and the permission fix. Must create
+        the file with 0600 perms atomically via os.open(..., mode=0o600)."""
+        import os as os_mod
+
+        captured = []
+        real_open = os_mod.open
+
+        def spy_open(path, flags, mode=0o777, *args, **kwargs):
+            captured.append((flags, mode))
+            return real_open(path, flags, mode, *args, **kwargs)
+
+        monkeypatch.setattr(os_mod, "open", spy_open)
+
+        save_credentials("user@test.com", "s3cret!", "mypass")
+
+        assert len(captured) == 2  # salt file + credentials file
+        for flags, mode in captured:
+            assert mode == 0o600
+            assert flags & os_mod.O_CREAT
+            assert flags & os_mod.O_WRONLY
+
     def test_overwrite(self):
         save_credentials("old@test.com", "old", "pass1")
         save_credentials("new@test.com", "new", "pass2")
