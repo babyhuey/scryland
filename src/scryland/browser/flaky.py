@@ -34,8 +34,13 @@ _FLAKY_MARKERS = (
     # case; "condition not found" (the row is genuinely absent) is a
     # data mismatch that shouldn't trigger retry.
     "Pricing table not rendered",
-    "Target page, context or browser has been closed",  # keep as real error
 )
+
+# Deliberately excluded from _FLAKY_MARKERS — a closed page/context/browser
+# is a real error, not a transient one, so it's kept separate rather than
+# relying on positional slicing (`_FLAKY_MARKERS[:-1]`) to exclude it, which
+# broke silently whenever a marker was appended above it.
+_CLOSED_MARKER = "Target page, context or browser has been closed"
 
 # Errors where the page is probably hung / stuck loading, and a hard
 # reload is more likely to help than another attempt on the same nav.
@@ -50,9 +55,9 @@ _HANG_MARKERS = (
 def _is_flaky(exc: BaseException) -> bool:
     msg = str(exc)
     # The "Target page … has been closed" text is a hard failure; strip it out.
-    if "has been closed" in msg:
+    if _CLOSED_MARKER in msg:
         return False
-    if any(marker in msg for marker in _FLAKY_MARKERS[:-1]):
+    if any(marker in msg for marker in _FLAKY_MARKERS):
         return True
     return _is_hang(exc)
 
