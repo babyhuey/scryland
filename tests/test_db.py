@@ -512,9 +512,7 @@ class TestTcgLowPriceFalsyZeroAndPreserve:
         db.upsert_listing(listing, "")
         db.conn.commit()
 
-        rescraped = _make_listing(
-            product_name="Bolt", condition="Near Mint", tcg_low_price=None
-        )
+        rescraped = _make_listing(product_name="Bolt", condition="Near Mint", tcg_low_price=None)
         db.upsert_listing(rescraped, "")
         row = db.conn.execute(
             "SELECT tcg_low_price FROM inventory WHERE product_name = 'Bolt'"
