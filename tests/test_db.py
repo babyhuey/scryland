@@ -146,6 +146,23 @@ class TestIsListed:
         assert db.is_listed("Card A", "Near Mint") is False
 
 
+class TestIsKnown:
+    def test_returns_none_when_unknown(self, db):
+        assert db.is_known("Ghost Card", "Near Mint", "") is None
+
+    def test_bare_condition_matches_foil_row_synced_with_embedded_condition(self, db):
+        """sync() stores the scraped condition with the finish embedded
+        ("Near Mint Foil"), while add-inventory looks it up with the bare
+        condition ("Near Mint") plus a separate finish ("Foil") — these must
+        still match so foil cards dedup correctly."""
+        db.sync([_make_listing(product_name="Sol Ring", condition="Near Mint Foil")])
+        assert db.is_known("Sol Ring", "Near Mint", "Foil") == "active"
+
+    def test_non_foil_still_matches(self, db):
+        db.sync([_make_listing(product_name="Sol Ring", condition="Near Mint")])
+        assert db.is_known("Sol Ring", "Near Mint", "") == "active"
+
+
 class TestIsListedFuzzy:
     def test_exact_match(self, db):
         db.upsert_listing(_make_listing(product_name="Lightning Bolt"))
@@ -172,6 +189,12 @@ class TestIsListedFuzzy:
         db.conn.commit()
         assert db.is_listed_fuzzy("Sol Ring", "Near Mint", "Foil") is True
         assert db.is_listed_fuzzy("Sol Ring", "Near Mint", "") is False
+
+    def test_bare_condition_matches_row_synced_with_embedded_foil_condition(self, db):
+        """Same add-inventory-vs-sync() mismatch as TestIsKnown, but for the
+        fuzzy path add-inventory also calls."""
+        db.sync([_make_listing(product_name="Sol Ring", condition="Near Mint Foil")])
+        assert db.is_listed_fuzzy("Sol Ring", "Near Mint", "Foil") is True
 
 
 class TestSync:

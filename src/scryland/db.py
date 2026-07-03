@@ -344,11 +344,16 @@ class InventoryDB:
             return True
 
     def is_listed(self, product_name: str, condition: str, finish: str = "") -> bool:
-        """Check if a card is already actively listed in our inventory."""
+        """Check if a card is already actively listed in our inventory.
+
+        Condition is compared with any embedded 'Foil' token stripped on
+        both sides — see `_bare_condition`.
+        """
         row = self.conn.execute(
             "SELECT id FROM inventory "
-            "WHERE product_name = ? AND condition = ? AND finish = ? AND status = 'active'",
-            (product_name, condition, finish),
+            "WHERE product_name = ? AND TRIM(REPLACE(condition, 'Foil', '')) = ? "
+            "AND finish = ? AND status = 'active'",
+            (product_name, _bare_condition(condition), finish),
         ).fetchone()
         return row is not None
 
@@ -362,10 +367,18 @@ class InventoryDB:
         return row is not None
 
     def is_known(self, product_name: str, condition: str, finish: str = "") -> str | None:
-        """Check if a card exists in the DB at all. Returns status or None."""
+        """Check if a card exists in the DB at all. Returns status or None.
+
+        Condition is compared with any embedded 'Foil' token stripped on
+        both sides so a bare condition ("Near Mint") matches a row that
+        `sync()` stored with the finish embedded ("Near Mint Foil") — see
+        `_bare_condition`. Without this, add-inventory's foil dedup check
+        never hits.
+        """
         row = self.conn.execute(
-            "SELECT status FROM inventory WHERE product_name = ? AND condition = ? AND finish = ?",
-            (product_name, condition, finish),
+            "SELECT status FROM inventory WHERE product_name = ? "
+            "AND TRIM(REPLACE(condition, 'Foil', '')) = ? AND finish = ?",
+            (product_name, _bare_condition(condition), finish),
         ).fetchone()
         return row["status"] if row else None
 
@@ -379,13 +392,16 @@ class InventoryDB:
         if self.is_listed(card_name, condition, finish):
             return True
 
+        bare_condition = _bare_condition(condition)
+
         # Check front face only for double-faced cards
         front_face = card_name.split("//")[0].strip()
         if front_face != card_name:
             row = self.conn.execute(
                 "SELECT id FROM inventory "
-                "WHERE product_name LIKE ? ESCAPE '\\' AND condition = ? AND finish = ? AND status = 'active'",
-                (f"%{_escape_like(front_face)}%", condition, finish),
+                "WHERE product_name LIKE ? ESCAPE '\\' "
+                "AND TRIM(REPLACE(condition, 'Foil', '')) = ? AND finish = ? AND status = 'active'",
+                (f"%{_escape_like(front_face)}%", bare_condition, finish),
             ).fetchone()
             if row:
                 return True
@@ -393,8 +409,9 @@ class InventoryDB:
         # Check if any active listing contains this card name
         row = self.conn.execute(
             "SELECT id FROM inventory "
-            "WHERE product_name LIKE ? ESCAPE '\\' AND condition = ? AND finish = ? AND status = 'active'",
-            (f"%{_escape_like(card_name)}%", condition, finish),
+            "WHERE product_name LIKE ? ESCAPE '\\' "
+            "AND TRIM(REPLACE(condition, 'Foil', '')) = ? AND finish = ? AND status = 'active'",
+            (f"%{_escape_like(card_name)}%", bare_condition, finish),
         ).fetchone()
         return row is not None
 
@@ -1113,6 +1130,18 @@ def canonical_key(
     num = (collector_number or "").lstrip("#").lstrip("0") or ""
     cond = condition.replace("Foil", "").strip().lower()
     return f"{name}|{set_part}|{num}|{cond}|{'F' if is_foil else 'N'}"
+
+
+def _bare_condition(condition: str) -> str:
+    """Strip an embedded 'Foil' finish token from a condition string.
+
+    `sync()` stores TCG's scraped condition with the finish embedded
+    ("Near Mint Foil"), while callers like add-inventory pass the bare
+    condition ("Near Mint") plus a separate finish. Mirrors the SQL-side
+    `TRIM(REPLACE(condition, 'Foil', ''))` so both sides normalize the
+    same way.
+    """
+    return condition.replace("Foil", "").strip()
 
 
 def _escape_like(s: str) -> str:
