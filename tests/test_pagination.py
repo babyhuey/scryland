@@ -14,27 +14,38 @@ class TestClickNextPage:
         # but the helper passes through retry_on_flaky which calls
         # evaluate as a bare coroutine — so just mock it.
         page.evaluate = AsyncMock(return_value="no-next")
-        page.wait_for_load_state = AsyncMock()
+        page.wait_for_function = AsyncMock()
         result = await click_next_page(page)
         assert result is NextPageResult.LAST_PAGE
 
-    async def test_advanced_when_load_settles(self):
+    async def test_advanced_when_content_signature_changes(self):
         page = MagicMock()
-        page.evaluate = AsyncMock(return_value="clicked")
-        page.wait_for_load_state = AsyncMock()
+        # First evaluate call captures the pre-click signature, second
+        # performs the click.
+        page.evaluate = AsyncMock(side_effect=["Viewing 1-25 of 100", "clicked"])
+        page.wait_for_function = AsyncMock()
         result = await click_next_page(page)
         assert result is NextPageResult.ADVANCED
+        # The captured "before" signature must be threaded through so the
+        # predicate can detect a genuine change, not just networkidle.
+        args, _kwargs = page.wait_for_function.call_args
+        assert args[1] == "Viewing 1-25 of 100"
 
-    async def test_stalled_when_load_times_out(self):
+    async def test_stalled_when_content_never_changes(self):
+        # Regression test for the networkidle race: an already-idle page
+        # resolves wait_for_load_state immediately, before the pagination
+        # XHR fires, so a queued double-advance can skip a page. Now we
+        # wait for the content signature to actually change; if it never
+        # does within the timeout, that must surface as STALLED.
         page = MagicMock()
-        page.evaluate = AsyncMock(return_value="clicked")
-        page.wait_for_load_state = AsyncMock(side_effect=Exception("timeout"))
+        page.evaluate = AsyncMock(side_effect=["Viewing 1-25 of 100", "clicked"])
+        page.wait_for_function = AsyncMock(side_effect=Exception("Timeout 15000ms exceeded"))
         result = await click_next_page(page)
         assert result is NextPageResult.STALLED
 
     async def test_disabled_next_is_last_page(self):
         page = MagicMock()
         page.evaluate = AsyncMock(return_value="disabled")
-        page.wait_for_load_state = AsyncMock()
+        page.wait_for_function = AsyncMock()
         result = await click_next_page(page)
         assert result is NextPageResult.LAST_PAGE
