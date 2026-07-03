@@ -208,9 +208,9 @@ class PricingPage:
         # The Save button is a link/button at the top right of the manage page
         # Try multiple selectors
         save_selectors = [
+            "input[value='Save']",
             "a:has-text('Save')",
             "button:has-text('Save')",
-            "input[value='Save']",
         ]
         for selector in save_selectors:
             save_btn = self._page.locator(selector).first
