@@ -66,12 +66,27 @@ class TestSensitiveDataFilter:
         assert record.msg == "no args"
 
     def test_non_string_args_untouched(self):
+        """Non-sensitive args still format correctly — the filter now
+        pre-formats the message (clearing record.args) rather than leaving
+        the raw args tuple for a later % substitution."""
         f = SensitiveDataFilter()
         record = self._make_record("count=%d", (42,))
         f.filter(record)
-        assert record.args == (42,)
+        assert record.getMessage() == "count=42"
 
     def test_always_returns_true(self):
         f = SensitiveDataFilter()
         record = self._make_record("test")
         assert f.filter(record) is True
+
+    def test_percent_style_arg_is_redacted_without_formatting_error(self):
+        """Redacting the raw '%s'-template can match-and-consume the
+        placeholder itself (e.g. "token=%s" matches the sensitive-key
+        pattern whole), corrupting the template so %-formatting later
+        raises. Must redact the fully formatted message instead."""
+        f = SensitiveDataFilter()
+        record = self._make_record("token=%s", ("SECRET",))
+        f.filter(record)
+        formatted = record.getMessage()  # must not raise
+        assert "SECRET" not in formatted
+        assert "[REDACTED]" in formatted
