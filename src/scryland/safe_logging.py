@@ -31,7 +31,18 @@ class SensitiveDataFilter(logging.Filter):
             # pattern whole), corrupting it so %-formatting later raises.
             # Clear args afterward so nothing re-formats the already-
             # substituted message.
-            record.msg = self._redact(record.getMessage())
+            #
+            # Guarded: filter() runs OUTSIDE logging's emit() try/except
+            # safety net, so a malformed log call (wrong %s/arg count)
+            # raising here would propagate into the caller — e.g. aborting
+            # an unattended watch loop — instead of degrading to logging's
+            # own "--- Logging error ---" handling. On failure, leave the
+            # record untouched so emit-time error handling applies.
+            try:
+                formatted = self._redact(record.getMessage())
+            except Exception:
+                return True
+            record.msg = formatted
             record.args = None
         elif isinstance(record.msg, str):
             record.msg = self._redact(record.msg)

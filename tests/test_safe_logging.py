@@ -90,3 +90,34 @@ class TestSensitiveDataFilter:
         formatted = record.getMessage()  # must not raise
         assert "SECRET" not in formatted
         assert "[REDACTED]" in formatted
+
+    def test_mismatched_placeholders_do_not_raise_out_of_filter(self):
+        """Filter.filter() runs OUTSIDE logging's emit() try/except safety
+        net. A malformed log call (wrong %s/arg count) must not raise out
+        of filter() into the caller — the record must be left untouched so
+        logging's own emit-time error handling ("--- Logging error ---")
+        applies, same degradation as stock logging."""
+        f = SensitiveDataFilter()
+        record = self._make_record("a=%s b=%s", ("only-one",))
+        assert f.filter(record) is True  # must not raise
+        # Record untouched: template + args intact for emit-time handling.
+        assert record.msg == "a=%s b=%s"
+        assert record.args == ("only-one",)
+
+    def test_mismatched_placeholders_handled_like_stock_logging(self, capsys):
+        """End-to-end: a malformed log call through a real logger+handler
+        with the filter attached must not raise, and must be routed to
+        logging's handleError path (stderr), not crash the caller."""
+        logger = logging.getLogger("scryland.test_safe_logging_malformed")
+        logger.handlers.clear()
+        logger.propagate = False
+        handler = logging.StreamHandler()
+        handler.addFilter(SensitiveDataFilter())
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        try:
+            logger.info("a=%s b=%s", "only-one")  # must not raise
+        finally:
+            logger.handlers.clear()
+        err = capsys.readouterr().err
+        assert "Logging error" in err
