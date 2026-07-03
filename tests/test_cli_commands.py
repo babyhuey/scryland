@@ -751,9 +751,7 @@ class TestFastUpdateEbayPrice:
         db = MagicMock()
         console = MagicMock()
 
-        result = await _fast_update_ebay_price(
-            ebay_client, db, card, existing, True, 1.00, console
-        )
+        result = await _fast_update_ebay_price(ebay_client, db, card, existing, True, 1.00, console)
 
         assert result == pytest.approx(1.49)
         assert result != existing["price"]
@@ -781,9 +779,7 @@ class TestFastUpdateEbayPrice:
         db = MagicMock()
         console = MagicMock()
 
-        result = await _fast_update_ebay_price(
-            ebay_client, db, card, existing, True, 1.00, console
-        )
+        result = await _fast_update_ebay_price(ebay_client, db, card, existing, True, 1.00, console)
 
         assert result is None
 

@@ -738,7 +738,11 @@ class InventoryDB:
         return True
 
     def is_sale_recorded(
-        self, order_number: str, product_name: str, condition: str = "", marketplace: str = "tcgplayer"
+        self,
+        order_number: str,
+        product_name: str,
+        condition: str = "",
+        marketplace: str = "tcgplayer",
     ) -> bool:
         """Return True if this order+product+condition+marketplace sale is
         already stored. Lets a caller distinguish "just recorded this sweep"
