@@ -305,7 +305,7 @@ class InventoryPage:
                                 if (ok) score = 1;
                             }
                         }
-                        if (score > 0) results.push({idx: manageIdx, score});
+                        if (score > 0) results.push({idx: manageIdx, score, name});
                     }
                     return results;
                 }""",
@@ -318,19 +318,31 @@ class InventoryPage:
             if candidates:
                 candidates.sort(key=lambda c: c["score"], reverse=True)
                 best_idx = candidates[0]["idx"]
+                best_name = candidates[0]["name"]
+                # A re-render between this scan and the click below could
+                # shuffle Manage rows, so re-verify the row at best_idx
+                # still has the name we scored before clicking it — mirrors
+                # the name-recheck in add_inventory.py's row click.
                 clicked = await retry_on_flaky(
-                    lambda best_idx=best_idx: self._page.evaluate(
-                        """(idx) => {
+                    lambda best_idx=best_idx, best_name=best_name: self._page.evaluate(
+                        """(args) => {
                         let counter = 0;
                         for (const el of document.querySelectorAll('a, button, input')) {
                             const text = (el.textContent || el.value || '').trim();
                             if (text !== 'Manage') continue;
-                            if (counter === idx) { el.click(); return true; }
+                            if (counter === args.idx) {
+                                const row = el.closest('tr');
+                                const cells = row ? row.querySelectorAll('td') : [];
+                                const name = cells.length >= 3 ? cells[2].innerText.trim() : '';
+                                if (name !== args.name) return false;
+                                el.click();
+                                return true;
+                            }
                             counter++;
                         }
                         return false;
                     }""",
-                        best_idx,
+                        {"idx": best_idx, "name": best_name},
                     ),
                     page=self._page,
                     label=f"click_manage_for_product click ({product_name!r})",

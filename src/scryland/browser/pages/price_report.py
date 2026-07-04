@@ -114,10 +114,12 @@ class PriceReportPage:
 
         Matches the row by exact equality on the name cell (cells[0], per
         get_differentials' column mapping) — a substring match let a target
-        like "Reprieve" match "Reprieve's Haunt" instead. If the matching
+        like "Reprieve" match "Reprieve's Haunt" instead. If a matching
         row has no control whose text/value is exactly "Manage", we refuse
         to click anything in that row rather than grabbing the first
-        anchor/button/input (which could be the product name link).
+        anchor/button/input (which could be the product name link) — and
+        keep scanning remaining rows, since two same-name printings can
+        appear on one page.
         """
         max_pages = 100
         for _ in range(max_pages):
@@ -133,7 +135,6 @@ class PriceReportPage:
                         const text = (el.textContent || el.value || '').trim();
                         if (text === 'Manage') { el.click(); return true; }
                     }
-                    return false;
                 }
                 return false;
             }""",

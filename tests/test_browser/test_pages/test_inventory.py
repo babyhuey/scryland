@@ -129,7 +129,10 @@ class TestClickManageForProduct:
         page = MagicMock()
         page.evaluate = AsyncMock(
             side_effect=[
-                [{"idx": 0, "score": 1}, {"idx": 2, "score": 3}],
+                [
+                    {"idx": 0, "score": 1, "name": "Reprieve's Haunt"},
+                    {"idx": 2, "score": 3, "name": "Reprieve"},
+                ],
                 True,
             ]
         )
@@ -139,7 +142,7 @@ class TestClickManageForProduct:
         await inv.click_manage_for_product("Reprieve")
 
         click_call = page.evaluate.call_args_list[1]
-        assert click_call.args[1] == 2
+        assert click_call.args[1] == {"idx": 2, "name": "Reprieve"}
 
 
 class TestApplyMyInventoryFilter:
