@@ -78,6 +78,19 @@ async def run_price_differential_optimize(
             f"[{color}]({our_pct:+.1f}%)[/{color}]"
         )
 
+        # Price floor: a TCG lowest above the $0.01 delist threshold but
+        # below the configured floor must not be applied — matching it
+        # would undercut our own price floor. Skip rather than clamp to
+        # the floor value, since the floor isn't a market price we can
+        # actually stand behind.
+        if lowest > 0.01 and lowest < config.min_price_floor:
+            console.print(
+                f"    [yellow]Skipped — ${lowest:.2f} below price floor "
+                f"${config.min_price_floor:.2f}[/yellow]"
+            )
+            result.skipped += 1
+            continue
+
         # Only prompt on big price drops. Skip prompt for increases and penny delists.
         if current > 0:
             change_pct = (lowest - current) / current * 100
