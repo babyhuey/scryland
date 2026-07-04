@@ -51,8 +51,11 @@ def build_listing(
     price_usd: float,
 ) -> EbayListing:
     """Construct a listing payload from a Mythic CSV row + optional Scryfall card."""
-    set_name = info.set_name if info else card.set_name
-    collector = info.collector_number if info else card.collector_number
+    # The CSV's set/collector are the ground truth for what's actually being
+    # sold — Scryfall's fallback chain (exact → fuzzy) can resolve to a
+    # different printing than the CSV row. Only fill gaps from Scryfall.
+    set_name = card.set_name or (info.set_name if info else "")
+    collector = card.collector_number or (info.collector_number if info else "")
     name = info.name if info else card.card_name
 
     title = _build_title(card, info, name, set_name, collector)
@@ -99,11 +102,16 @@ def build_listing(
     if info and info.colors is not None:
         aspects["Color"] = _colors_from_scryfall(info.colors)
 
-    # Required condition descriptor for trading-cards categories.
-    card_cond_value = _CARD_CONDITION_VALUE_ID.get(
-        card.tcg_condition,
-        _CARD_CONDITION_VALUE_ID["Near Mint"],
-    )
+    # Required condition descriptor for trading-cards categories. An
+    # unmapped condition must not silently list as Near Mint — raise so
+    # the caller can skip this card with a loud log instead.
+    if card.tcg_condition not in _CARD_CONDITION_VALUE_ID:
+        raise ValueError(
+            f"Unknown TCG condition '{card.tcg_condition}' for '{name}' — "
+            f"no eBay Card Condition mapping (known: "
+            f"{sorted(_CARD_CONDITION_VALUE_ID)})"
+        )
+    card_cond_value = _CARD_CONDITION_VALUE_ID[card.tcg_condition]
     condition_descriptors = [
         {
             "name": _CARD_CONDITION_DESCRIPTOR_ID,

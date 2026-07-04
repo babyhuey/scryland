@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
+import pytest
+
 from scryland.ebay.listing import (
     _CARD_CONDITION_VALUE_ID,
     DEFAULT_CATEGORY_ID,
@@ -208,3 +210,23 @@ class TestBuildListing:
         card = _Card("X", "Y", "", "Near Mint")
         listing = build_listing(card, None, 1.00)
         assert "Card Number" not in listing.aspects
+
+    def test_unknown_condition_raises_instead_of_defaulting_to_nm(self):
+        """An unmapped tcg_condition must not silently list as Near Mint."""
+        card = _Card("X", "Y", "9", "Poor")  # not in _CARD_CONDITION_VALUE_ID
+        with pytest.raises(ValueError, match="Poor"):
+            build_listing(card, None, 1.00)
+
+    def test_csv_set_and_collector_preferred_over_scryfall(self):
+        """CSV set/collector must win when present; Scryfall's fuzzy-matched
+        printing (a different set/number) must only fill gaps."""
+        card = _Card("Reprieve", "CSV Set X", "42", "Near Mint")
+        listing = build_listing(card, _info(set_name="Scryfall Set Y", collector="9"), 1.00)
+        assert listing.aspects["Set"] == ["CSV Set X"]
+        assert listing.aspects["Card Number"] == ["42"]
+
+    def test_scryfall_fills_gaps_when_csv_blank(self):
+        card = _Card("Reprieve", "", "", "Near Mint")
+        listing = build_listing(card, _info(set_name="Scryfall Set Y", collector="9"), 1.00)
+        assert listing.aspects["Set"] == ["Scryfall Set Y"]
+        assert listing.aspects["Card Number"] == ["9"]
