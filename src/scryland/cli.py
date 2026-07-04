@@ -46,6 +46,24 @@ def _empty_ebay_result(*, error: str | None = None) -> dict:
     }
 
 
+def _compute_undercut_price(lowest: float, min_price: float, our_ship: float) -> tuple[float, bool]:
+    """Undercut a competitor's total (item + shipping) price by $0.01, then
+    back out our shipping cost to get our item price.
+
+    Floored by eBay's hard $0.99 minimum and the user's --min-price so we
+    never list below either. Shared by ebay-preview and list-on-ebay so
+    the two commands never drift apart on the math. Returns
+    (price, floor_applied) — floor_applied is True when the raw undercut
+    fell below one of the floors, so callers can print "Match" vs
+    "Undercut" accordingly.
+    """
+    target_total = lowest - 0.01
+    undercut_target = round(target_total - our_ship, 2)
+    price = round(max(undercut_target, min_price, 0.99), 2)
+    floor_applied = undercut_target < max(min_price, 0.99)
+    return price, floor_applied
+
+
 async def _fast_update_ebay_price(
     ebay_client,
     db,
@@ -122,6 +140,31 @@ async def _fast_update_ebay_price(
         price = 0.99
 
     current_price = existing.get("price") or 0
+
+    # Big-drop guardrail — the watch sweep's undercut sweep skips (and
+    # warns on) drops this large instead of applying them; this fast path
+    # reprices immediately without one, so mirror that here rather than
+    # prompting (this runs non-interactively, mid-batch).
+    from scryland.pricing.guardrails import is_big_price_drop as _is_big_drop
+
+    max_pct = ebay_client._config.max_price_change_pct
+    max_abs = ebay_client._config.max_price_change_abs
+    if _is_big_drop(current_price, price, max_pct, max_abs):
+        logger.warning(
+            "Fast-update big price drop for %s: $%.2f -> $%.2f "
+            "(>%.0f%% and >$%.2f) — skipping, keeping current price",
+            card.card_name,
+            current_price,
+            price,
+            max_pct,
+            max_abs,
+        )
+        console.print(
+            f"  [yellow]Skip big drop ${current_price:.2f} → ${price:.2f} "
+            f"(>{max_pct:.0f}% AND >${max_abs:.2f})[/yellow]"
+        )
+        return current_price
+
     if abs(price - current_price) < 0.01:
         console.print(f"  [dim]Price unchanged at ${current_price:.2f} — skip[/dim]")
         return current_price
@@ -4440,7 +4483,9 @@ def ebay_preview(
                         if lowest is None:
                             console.print("  [dim]Undercut: no eBay matches — using CSV[/dim]")
                         else:
-                            target = max(round(lowest - 0.01, 2), min_price)
+                            target, _ = _compute_undercut_price(
+                                lowest, min_price, config.ebay_shipping_cost
+                            )
                             console.print(
                                 f"  [dim]Undercut: eBay lowest ${lowest:.2f} → "
                                 f"would list at ${target:.2f}[/dim]"
@@ -4713,10 +4758,8 @@ def list_on_ebay(
                         # Floor honours BOTH eBay's hard $0.99 minimum and
                         # the user's --min-price.
                         our_ship = config.ebay_shipping_cost
-                        target_total = lowest - 0.01
-                        undercut_target = round(target_total - our_ship, 2)
-                        target = round(max(undercut_target, min_price, 0.99), 2)
-                        if undercut_target < max(min_price, 0.99):
+                        target, floor_applied = _compute_undercut_price(lowest, min_price, our_ship)
+                        if floor_applied:
                             our_total = target + our_ship
                             console.print(
                                 f"  [dim]Match: competitor total ${lowest:.2f}; "
@@ -4760,7 +4803,21 @@ def list_on_ebay(
                     )
                     price = EBAY_HARD_MIN
 
-                listing = build_listing(card, info, price)
+                try:
+                    listing = build_listing(card, info, price)
+                except ValueError as exc:
+                    logger.warning("Could not build listing for %s: %s", card.card_name, exc)
+                    console.print(f"  [red]Skipped: {exc}[/red]")
+                    failed += 1
+                    results.append(
+                        {
+                            "card": card,
+                            "status": f"build failed: {exc}",
+                            "price": price,
+                            "listing_id": None,
+                        }
+                    )
+                    continue
 
                 try:
                     result = await ebay.publish_listing(listing, draft=draft)

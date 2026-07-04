@@ -229,6 +229,73 @@ class TestEbayPreview:
         assert result.exit_code == 0
         assert "Reprieve" in result.output
 
+    def test_undercut_price_matches_list_on_ebay_math(
+        self, runner, tmp_path, db_path, ebay_configured, mock_ebay, monkeypatch
+    ):
+        """The --undercut preview price must match what list-on-ebay would
+        actually apply for the same lowest/min-price/shipping inputs."""
+        import csv
+
+        csv_path = tmp_path / "cards.csv"
+        with open(csv_path, "w") as f:
+            w = csv.writer(f)
+            w.writerow(
+                [
+                    "Card Name",
+                    "Set Code",
+                    "Set Name",
+                    "Collector Number",
+                    "Rarity",
+                    "Language",
+                    "Quantity",
+                    "Condition",
+                    "Finish",
+                    "Altered",
+                    "Signed",
+                    "Misprint",
+                    "Price (USD)",
+                    "Price (USD Foil)",
+                    "Price (USD Etched)",
+                    "Scryfall ID",
+                ]
+            )
+            w.writerow(
+                [
+                    "Reprieve",
+                    "SOA",
+                    "Secrets of Strixhaven: Mystical Archive",
+                    "9",
+                    "rare",
+                    "en",
+                    "1",
+                    "NM",
+                    "nonfoil",
+                    "false",
+                    "false",
+                    "false",
+                    "2.49",
+                    "0",
+                    "0",
+                    "abc",
+                ]
+            )
+
+        async def fake_find_card(self, name, set_name=None, collector_number=None):
+            return None
+
+        monkeypatch.setattr(
+            "scryland.ebay.scryfall.ScryfallClient.find_card",
+            fake_find_card,
+        )
+        # mock_ebay's find_lowest_price defaults to $2.49; our_ship defaults
+        # to $0.99 → target_total=2.48, undercut_target=2.48-0.99=1.49.
+        result = runner.invoke(
+            cli,
+            ["ebay-preview", str(csv_path), "-n", "1", "--min-price", "1.00", "--undercut"],
+        )
+        assert result.exit_code == 0
+        assert "would list at $1.49" in result.output
+
 
 @pytest.fixture
 def mock_ebay(monkeypatch):
@@ -697,6 +764,116 @@ class TestListOnEbay:
         assert "1 skipped" in result.output
         assert "0 failed" in result.output
 
+    def test_build_listing_failure_skips_card_not_whole_batch(
+        self, runner, tmp_path, db_path, ebay_configured, mock_ebay, monkeypatch
+    ):
+        """A build_listing failure (e.g. an unknown TCG condition) must skip
+        just that card with a loud log — not crash the whole batch."""
+        import csv
+
+        async def fake_find_card(self, name, set_name=None, collector_number=None):
+            return None
+
+        monkeypatch.setattr(
+            "scryland.ebay.scryfall.ScryfallClient.find_card",
+            fake_find_card,
+        )
+
+        csv_path = tmp_path / "cards.csv"
+        with open(csv_path, "w") as f:
+            w = csv.writer(f)
+            w.writerow(
+                [
+                    "Card Name",
+                    "Set Code",
+                    "Set Name",
+                    "Collector Number",
+                    "Rarity",
+                    "Language",
+                    "Quantity",
+                    "Condition",
+                    "Finish",
+                    "Altered",
+                    "Signed",
+                    "Misprint",
+                    "Price (USD)",
+                    "Price (USD Foil)",
+                    "Price (USD Etched)",
+                    "Scryfall ID",
+                ]
+            )
+            for name in ("Bad Card", "Good Card"):
+                w.writerow(
+                    [
+                        name,
+                        "M21",
+                        "Core Set 2021",
+                        "1",
+                        "common",
+                        "en",
+                        "1",
+                        "NM",
+                        "nonfoil",
+                        "false",
+                        "false",
+                        "false",
+                        "2.00",
+                        "0",
+                        "0",
+                        "abc",
+                    ]
+                )
+
+        from scryland.ebay import listing as listing_mod
+
+        orig_build_listing = listing_mod.build_listing
+
+        def flaky_build_listing(card, info, price):
+            if card.card_name == "Bad Card":
+                raise ValueError("Unknown TCG condition 'XX' for 'Bad Card'")
+            return orig_build_listing(card, info, price)
+
+        monkeypatch.setattr(listing_mod, "build_listing", flaky_build_listing)
+
+        result = runner.invoke(
+            cli,
+            ["list-on-ebay", str(csv_path), "--no-undercut", "--min-price", "0.00"],
+        )
+        assert result.exit_code == 0
+        assert "1 listed" in result.output
+        assert "1 failed" in result.output
+
+
+class TestComputeUndercutPrice:
+    """ebay-preview and list-on-ebay must compute identical undercut prices
+    for the same inputs — they now share one helper instead of two
+    independently-drifted formulas."""
+
+    def test_matches_real_listing_math(self):
+        from scryland.cli import _compute_undercut_price
+
+        # lowest=3.30 → target_total=3.29, undercut_target=3.29-0.99=2.30,
+        # above both floors → no floor applied.
+        price, floor_applied = _compute_undercut_price(lowest=3.30, min_price=1.00, our_ship=0.99)
+        assert price == pytest.approx(2.30)
+        assert floor_applied is False
+
+    def test_floor_applied_when_undercut_below_min_price(self):
+        from scryland.cli import _compute_undercut_price
+
+        # lowest=1.50 → target_total=1.49, undercut_target=1.49-0.99=0.50,
+        # below min_price(1.00) → floored at min_price.
+        price, floor_applied = _compute_undercut_price(lowest=1.50, min_price=1.00, our_ship=0.99)
+        assert price == 1.00
+        assert floor_applied is True
+
+    def test_floor_applied_when_undercut_below_ebay_hard_minimum(self):
+        from scryland.cli import _compute_undercut_price
+
+        price, floor_applied = _compute_undercut_price(lowest=1.00, min_price=0.25, our_ship=0.99)
+        assert price == 0.99
+        assert floor_applied is True
+
 
 class TestFastUpdateEbayPrice:
     """Direct unit tests for the private _fast_update_ebay_price helper —
@@ -745,15 +922,22 @@ class TestFastUpdateEbayPrice:
             "quantity": 1,
         }
         ebay_client = MagicMock()
-        ebay_client.find_lowest_price = AsyncMock(return_value=2.49)
+        # Lowest total $3.30 → item price $2.30 after undercut+shipping math —
+        # a small ~7.6%/$0.19 drop from $2.49, under the big-drop thresholds,
+        # so this exercises the "normal update" path, not the guardrail.
+        ebay_client.find_lowest_price = AsyncMock(return_value=3.30)
         ebay_client.update_offer_price = AsyncMock(return_value=True)
-        ebay_client._config = MagicMock(ebay_shipping_cost=0.99)
+        ebay_client._config = MagicMock(
+            ebay_shipping_cost=0.99,
+            max_price_change_pct=10.0,
+            max_price_change_abs=0.50,
+        )
         db = MagicMock()
         console = MagicMock()
 
         result = await _fast_update_ebay_price(ebay_client, db, card, existing, True, 1.00, console)
 
-        assert result == pytest.approx(1.49)
+        assert result == pytest.approx(2.30)
         assert result != existing["price"]
 
     async def test_returns_none_on_update_failure(self):
@@ -773,15 +957,65 @@ class TestFastUpdateEbayPrice:
             "quantity": 1,
         }
         ebay_client = MagicMock()
-        ebay_client.find_lowest_price = AsyncMock(return_value=2.49)
+        # Same small, under-threshold drop as above — this test targets the
+        # update_offer_price failure path, not the big-drop guardrail.
+        ebay_client.find_lowest_price = AsyncMock(return_value=3.30)
         ebay_client.update_offer_price = AsyncMock(return_value=False)
-        ebay_client._config = MagicMock(ebay_shipping_cost=0.99)
+        ebay_client._config = MagicMock(
+            ebay_shipping_cost=0.99,
+            max_price_change_pct=10.0,
+            max_price_change_abs=0.50,
+        )
         db = MagicMock()
         console = MagicMock()
 
         result = await _fast_update_ebay_price(ebay_client, db, card, existing, True, 1.00, console)
 
         assert result is None
+
+    async def test_big_drop_skipped_not_applied(self, caplog):
+        """Unlike the watch sweep's undercut sweep, the fast-update path had
+        no big-drop guardrail — it must skip + warn instead of repricing
+        immediately, matching the watch sweep's non-interactive handling."""
+        import logging
+
+        from scryland.cli import _fast_update_ebay_price
+
+        card = self._make_card()
+        existing = {
+            "offer_id": "OFF1",
+            "sku": "SKU1",
+            "listing_id": "L1",
+            "product_name": "Reprieve",
+            "set_name": "Secrets of Strixhaven: Mystical Archive",
+            "collector_number": "9",
+            "condition": "Near Mint",
+            "is_foil": 0,
+            "price": 2.49,
+            "quantity": 1,
+        }
+        ebay_client = MagicMock()
+        # Lowest total $2.49 → item price $1.49 — a 40%/$1.00 drop from
+        # $2.49, comfortably over the default 10%/$0.50 thresholds.
+        ebay_client.find_lowest_price = AsyncMock(return_value=2.49)
+        ebay_client.update_offer_price = AsyncMock(return_value=True)
+        ebay_client._config = MagicMock(
+            ebay_shipping_cost=0.99,
+            max_price_change_pct=10.0,
+            max_price_change_abs=0.50,
+        )
+        db = MagicMock()
+        console = MagicMock()
+
+        with caplog.at_level(logging.WARNING, logger="scryland"):
+            result = await _fast_update_ebay_price(
+                ebay_client, db, card, existing, True, 1.00, console
+            )
+
+        ebay_client.update_offer_price.assert_not_awaited()
+        db.upsert_ebay_listing.assert_not_called()
+        assert result == existing["price"]
+        assert any("big" in r.message.lower() for r in caplog.records)
 
 
 class TestAddInventoryDryRun:
