@@ -313,3 +313,121 @@ class TestParseTokenResponseGuard:
         )
         assert bundle.access_token == "tok"
         assert bundle.refresh_token == "ref"
+
+
+class TestExpiresInDefault:
+    """Missing expires_in must not be treated as an instantly-expired (0s)
+    token — that forces a refetch on every single call."""
+
+    def test_missing_expires_in_defaults_conservatively(self, config_prod, caplog):
+        import logging
+
+        auth = EbayAuth(config_prod)
+        with caplog.at_level(logging.WARNING, logger="scryland"):
+            bundle = auth._parse_token_response({"access_token": "tok"})
+        assert bundle.expires_at > time.time() + 1000
+        assert any("expires_in" in r.message for r in caplog.records)
+
+    def test_present_expires_in_respected(self, config_prod):
+        auth = EbayAuth(config_prod)
+        bundle = auth._parse_token_response({"access_token": "tok", "expires_in": 7200})
+        assert bundle.expires_at == pytest.approx(time.time() + 7200, abs=2)
+
+    async def test_app_token_missing_expires_in_defaults_conservatively(
+        self, config_prod, monkeypatch, caplog
+    ):
+        import logging
+
+        import httpx as _httpx
+
+        from scryland.ebay import auth as auth_mod
+
+        def handler(req):
+            return _httpx.Response(200, json={"access_token": "app-tok"})
+
+        _mock_httpx_client(monkeypatch, auth_mod, handler)
+        auth = EbayAuth(config_prod)
+        with caplog.at_level(logging.WARNING, logger="scryland"):
+            tok = await auth.app_access_token()
+        assert tok == "app-tok"
+        assert auth._app_token_expires_at > time.time() + 1000
+        assert any("expires_in" in r.message for r in caplog.records)
+
+
+class TestConcurrentRefresh:
+    async def test_exactly_one_refresh_for_concurrent_callers(self, config_prod, monkeypatch):
+        """8 concurrent access_token() calls against an expired cached token
+        must trigger exactly one _refresh — the rest wait on the lock and
+        reuse the freshly-refreshed token."""
+        import asyncio
+
+        auth = EbayAuth(config_prod)
+        expired = TokenBundle(
+            access_token="old",
+            expires_at=time.time() - 10,
+            refresh_token="r",
+        )
+        auth._save(expired, "pw")
+
+        refresh_calls = {"n": 0}
+
+        async def fake_refresh(refresh_token):
+            refresh_calls["n"] += 1
+            await asyncio.sleep(0.01)  # force a real interleaving window
+            return TokenBundle(
+                access_token="new-tok",
+                expires_at=time.time() + 3600,
+                refresh_token="r2",
+            )
+
+        monkeypatch.setattr(auth, "_refresh", fake_refresh)
+
+        results = await asyncio.gather(*(auth.access_token("pw") for _ in range(8)))
+
+        assert refresh_calls["n"] == 1
+        assert all(tok == "new-tok" for tok in results)
+
+
+class TestAtomicWriteHelper:
+    def test_writes_target_with_0600_perms(self, tmp_path):
+        from scryland.ebay.auth import _write_secure_atomic
+
+        target = tmp_path / "secret.bin"
+        _write_secure_atomic(target, b"hello")
+        assert target.read_bytes() == b"hello"
+        assert oct(target.stat().st_mode)[-3:] == "600"
+
+    def test_no_leftover_temp_file(self, tmp_path):
+        from scryland.ebay.auth import _write_secure_atomic
+
+        target = tmp_path / "secret.bin"
+        _write_secure_atomic(target, b"hello")
+        leftovers = [p for p in tmp_path.iterdir() if p.name != "secret.bin"]
+        assert leftovers == []
+
+    def test_uses_atomic_replace_not_direct_write(self, tmp_path, monkeypatch):
+        """A crash between staging the new payload and the final rename must
+        never leave `target` holding a half-written file — verify the write
+        goes through os.replace rather than a direct write to the final path."""
+        from scryland.ebay import auth as auth_mod
+
+        target = tmp_path / "secret.bin"
+        target.write_bytes(b"OLD")  # pre-existing file, simulating a prior save
+
+        replace_calls = []
+        orig_replace = auth_mod.os.replace
+
+        def spy_replace(src, dst):
+            # At the moment of replace, the temp file must already hold the
+            # full new payload while the target still has the OLD content —
+            # proving the new data was staged, not written in place.
+            assert Path(src).read_bytes() == b"NEW-DATA"
+            assert target.read_bytes() == b"OLD"
+            replace_calls.append((src, dst))
+            return orig_replace(src, dst)
+
+        monkeypatch.setattr(auth_mod.os, "replace", spy_replace)
+        auth_mod._write_secure_atomic(target, b"NEW-DATA")
+
+        assert len(replace_calls) == 1
+        assert target.read_bytes() == b"NEW-DATA"

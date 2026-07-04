@@ -14,6 +14,7 @@ demand by exchanging the stored refresh token.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -29,6 +30,38 @@ from scryland.config import ScrylandConfig
 from scryland.credentials import _derive_key  # reuse the project's PBKDF2 helper
 
 logger = logging.getLogger("scryland")
+
+# Conservative fallback when eBay's token response omits expires_in — an
+# access token treated as instantly expired forces a refresh on every call.
+_DEFAULT_EXPIRES_IN_S = 1800
+
+
+def _expires_in_seconds(data: dict) -> int:
+    if "expires_in" not in data:
+        logger.warning(
+            "eBay token response missing expires_in — assuming %ds",
+            _DEFAULT_EXPIRES_IN_S,
+        )
+        return _DEFAULT_EXPIRES_IN_S
+    return int(data["expires_in"])
+
+
+def _write_secure_atomic(path: Path, data: bytes) -> None:
+    """Write `data` to `path` atomically with 0600 permissions.
+
+    Writes to a sibling temp file — created with 0600 via os.open so there's
+    no write-then-chmod permission window (same pattern as
+    credentials.py's _write_secure) — then os.replace()s it into place, so a
+    crash mid-write can never leave `path` holding a half-written payload.
+    """
+    tmp_path = path.with_name(path.name + ".tmp")
+    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    os.replace(tmp_path, path)
+
 
 _SCOPES = [
     "https://api.ebay.com/oauth/api_scope/sell.inventory",
@@ -72,6 +105,7 @@ class EbayAuth:
         self._cached: TokenBundle | None = None
         self._app_token: str | None = None
         self._app_token_expires_at: float = 0.0
+        self._refresh_lock = asyncio.Lock()
 
     @property
     def api_base(self) -> str:
@@ -109,23 +143,35 @@ class EbayAuth:
         return bundle
 
     async def access_token(self, passphrase: str) -> str:
-        """Return a valid access token, refreshing from disk if needed."""
+        """Return a valid access token, refreshing from disk if needed.
+
+        The lock makes this safe to call concurrently (e.g. a gather() loop
+        of API calls that all need a token): only the first caller to find
+        the token expired actually refreshes; the rest wait on the lock and
+        re-check `_cached` — which by then holds the fresh token — instead
+        of each independently hitting the refresh endpoint.
+        """
         if self._cached and self._cached.expires_at - 60 > time.time():
             return self._cached.access_token
-        bundle = self._cached or self._load(passphrase)
-        if bundle.expires_at - 60 > time.time():
+        async with self._refresh_lock:
+            # Double-checked: another caller may have refreshed while we
+            # were waiting for the lock.
+            if self._cached and self._cached.expires_at - 60 > time.time():
+                return self._cached.access_token
+            bundle = self._cached or self._load(passphrase)
+            if bundle.expires_at - 60 > time.time():
+                self._cached = bundle
+                return bundle.access_token
+            refreshed = await self._refresh(bundle.refresh_token)
+            # Refresh response doesn't include a new refresh_token usually.
+            bundle = TokenBundle(
+                access_token=refreshed.access_token,
+                expires_at=refreshed.expires_at,
+                refresh_token=refreshed.refresh_token or bundle.refresh_token,
+            )
+            self._save(bundle, passphrase)
             self._cached = bundle
             return bundle.access_token
-        refreshed = await self._refresh(bundle.refresh_token)
-        # Refresh response doesn't include a new refresh_token usually.
-        bundle = TokenBundle(
-            access_token=refreshed.access_token,
-            expires_at=refreshed.expires_at,
-            refresh_token=refreshed.refresh_token or bundle.refresh_token,
-        )
-        self._save(bundle, passphrase)
-        self._cached = bundle
-        return bundle.access_token
 
     async def app_access_token(self) -> str:
         """Return an application-scoped token (for Browse API etc.).
@@ -152,7 +198,7 @@ class EbayAuth:
                 f"eBay app token response missing access_token. Keys present: {list(data.keys())}"
             )
         self._app_token = data["access_token"]
-        self._app_token_expires_at = time.time() + int(data.get("expires_in", 0))
+        self._app_token_expires_at = time.time() + _expires_in_seconds(data)
         return self._app_token
 
     async def _refresh(self, refresh_token: str) -> TokenBundle:
@@ -193,7 +239,7 @@ class EbayAuth:
             )
         return TokenBundle(
             access_token=data["access_token"],
-            expires_at=time.time() + int(data.get("expires_in", 0)),
+            expires_at=time.time() + _expires_in_seconds(data),
             refresh_token=data.get("refresh_token") or fallback_refresh or "",
         )
 
@@ -217,8 +263,6 @@ class EbayAuth:
         from cryptography.fernet import Fernet
 
         salt = os.urandom(16)
-        self._salt_path().write_bytes(salt)
-        self._salt_path().chmod(0o600)
         key = _derive_key(passphrase, salt)
         f = Fernet(key)
         payload = json.dumps(
@@ -230,8 +274,10 @@ class EbayAuth:
             }
         ).encode()
         encrypted = f.encrypt(payload)
-        self._path().write_bytes(encrypted)
-        self._path().chmod(0o600)
+        # Salt first, then credentials — both atomic (temp file + replace)
+        # so a crash mid-write never leaves either file half-written.
+        _write_secure_atomic(self._salt_path(), salt)
+        _write_secure_atomic(self._path(), encrypted)
 
     def _load(self, passphrase: str) -> TokenBundle:
         from cryptography.fernet import Fernet, InvalidToken
