@@ -135,7 +135,41 @@ class TestWithdrawOffer:
             )
 
         client = _make_client(config, httpx.MockTransport(handler))
-        assert await client.withdraw_offer("OFFER1") is False
+        import asyncio
+
+        orig_sleep = asyncio.sleep
+        asyncio.sleep = AsyncMock()  # type: ignore
+        try:
+            assert await client.withdraw_offer("OFFER1") is False
+        finally:
+            asyncio.sleep = orig_sleep  # type: ignore
+        await client._http.aclose()
+
+    async def test_25001_is_retried_then_surfaces_failure(self, config):
+        """25001 is eBay's transient system error (same as _put_inventory_item)
+        — it must be retried, not treated as benign 'already withdrawn'."""
+        calls = {"n": 0}
+
+        def handler(req):
+            calls["n"] += 1
+            return httpx.Response(
+                400,
+                json={
+                    "errors": [{"errorId": 25001, "message": "Internal error, please retry"}],
+                },
+            )
+
+        client = _make_client(config, httpx.MockTransport(handler))
+        import asyncio
+
+        orig_sleep = asyncio.sleep
+        asyncio.sleep = AsyncMock()  # type: ignore
+        try:
+            result = await client.withdraw_offer("OFFER1")
+        finally:
+            asyncio.sleep = orig_sleep  # type: ignore
+        assert result is False
+        assert calls["n"] == 4  # exhausted all retry attempts, never returned True
         await client._http.aclose()
 
 
@@ -375,6 +409,60 @@ class TestFindLowestPrice:
                 "9",
                 is_foil=False,
             )
+        await client._http.aclose()
+
+    async def test_short_name_does_not_substring_match_longer_word(self, config):
+        """'Opt' must not match inside 'Optimal' — word-boundary, not substring."""
+
+        def handler(req):
+            return httpx.Response(
+                200,
+                json={
+                    "itemSummaries": [
+                        {
+                            "title": "Optimal Deck Box for MTG cards",
+                            "price": {"value": "1.00"},
+                            "seller": {"username": "x"},
+                        },
+                    ],
+                },
+            )
+
+        client = _make_client(config, httpx.MockTransport(handler))
+        lowest = await client.find_lowest_price(
+            "Opt",
+            "",
+            "",
+            is_foil=False,
+        )
+        assert lowest is None
+        await client._http.aclose()
+
+    async def test_short_name_matches_as_whole_word(self, config):
+        """'Opt' must still match a listing where it appears as its own word."""
+
+        def handler(req):
+            return httpx.Response(
+                200,
+                json={
+                    "itemSummaries": [
+                        {
+                            "title": "MTG Opt NM",
+                            "price": {"value": "1.00"},
+                            "seller": {"username": "x"},
+                        },
+                    ],
+                },
+            )
+
+        client = _make_client(config, httpx.MockTransport(handler))
+        lowest = await client.find_lowest_price(
+            "Opt",
+            "",
+            "",
+            is_foil=False,
+        )
+        assert lowest == pytest.approx(1.00)
         await client._http.aclose()
 
 
@@ -625,6 +713,65 @@ class TestPublishListing:
         result = await client.publish_listing(listing, draft=True)
         assert result.draft is True
         assert result.listing_id is None
+        await client._http.aclose()
+
+    async def test_publish_2xx_empty_listing_id_raises(self, config):
+        """A 2xx publish response with no listingId is not success — eBay's
+        own 'already published' path already treats a missing listingId as
+        an error; a fresh publish must be held to the same standard."""
+        from dataclasses import dataclass
+
+        from scryland.ebay.listing import build_listing
+
+        @dataclass
+        class C:
+            card_name: str = "X"
+            set_name: str = "Y"
+            collector_number: str = "1"
+            tcg_condition: str = "Near Mint"
+            quantity: int = 1
+            is_foil: bool = False
+            effective_price = 1.00
+
+        def handler(req):
+            url, method = str(req.url), req.method
+            if "inventory_item/" in url and method == "PUT":
+                return httpx.Response(204)
+            if "/offer" in url and method == "GET":
+                return httpx.Response(200, json={"offers": []})
+            if url.endswith("/offer") and method == "POST":
+                return httpx.Response(201, json={"offerId": "OFF3"})
+            if "/publish" in url and method == "POST":
+                return httpx.Response(200, json={})  # no listingId
+            return httpx.Response(500, text=f"unmocked {method} {url}")
+
+        client = _make_client(config, httpx.MockTransport(handler))
+        listing = build_listing(C(), None, 1.00)
+        with pytest.raises(RuntimeError, match="no listingId"):
+            await client.publish_listing(listing, draft=False)
+        await client._http.aclose()
+
+
+class TestIterOffersForSkus:
+    async def test_404_silently_skipped(self, config):
+        def handler(req):
+            return httpx.Response(404)
+
+        client = _make_client(config, httpx.MockTransport(handler))
+        offers = await client.iter_offers_for_skus(["SKU1", "SKU2"])
+        assert offers == []
+        await client._http.aclose()
+
+    async def test_non_404_error_raises(self, config):
+        """A genuine outage (500) must not be conflated with 'SKU no longer
+        listed' (404) — the caller needs to know the fetch failed."""
+
+        def handler(req):
+            return httpx.Response(500, text="server error")
+
+        client = _make_client(config, httpx.MockTransport(handler))
+        with pytest.raises(RuntimeError, match="500"):
+            await client.iter_offers_for_skus(["SKU1"])
         await client._http.aclose()
 
 

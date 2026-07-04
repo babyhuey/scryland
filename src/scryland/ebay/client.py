@@ -284,6 +284,8 @@ class EbayClient:
 
         SKUs whose lookup 404s or returns no offers are silently dropped —
         they were ended/withdrawn outside scryland and are no longer live.
+        Other HTTP errors (5xx, etc.) raise — a transient outage must not
+        be mistaken for "no longer listed".
         """
         sem = asyncio.Semaphore(concurrency)
 
@@ -302,13 +304,9 @@ class EbayClient:
             if r.status_code == 404:
                 return []
             if r.status_code >= 300:
-                logger.warning(
-                    "list offers for sku %s failed %d: %s",
-                    sku,
-                    r.status_code,
-                    r.text[:200],
+                raise RuntimeError(
+                    f"list offers for sku {sku} failed {r.status_code}: {r.text[:200]}"
                 )
-                return []
             return r.json().get("offers") or []
 
         results = await asyncio.gather(*(_fetch(sku) for sku in skus))
@@ -606,6 +604,7 @@ class EbayClient:
             return base + (cheapest_ship or 0.0)
 
         name_token = card_name.lower().split("//")[0].strip()
+        name_pattern = re.compile(r"\b" + re.escape(name_token) + r"\b")
         set_token = (set_name or "").lower().split(":")[0].strip()
         own_seller = await self.get_own_seller_username()
 
@@ -627,7 +626,7 @@ class EbayClient:
             if any(t in title for t in bad_terms):
                 rej["bad_term"] += 1
                 continue
-            if name_token not in title:
+            if not name_pattern.search(title):
                 rej["name_miss"] += 1
                 continue
             # Finish match: listings with "foil" in title when we want
@@ -705,44 +704,74 @@ class EbayClient:
 
         Uses POST /sell/inventory/v1/offer/{offerId}/withdraw which ends the
         listing but preserves the offer so it can be republished later.
+
+        errorId 25001 is eBay's transient "Core Inventory Service internal
+        error" (same code `_put_inventory_item` retries) — NOT a benign
+        "already withdrawn" signal, despite older code treating it as one.
+        Retried like 5xx/429; a still-failing withdraw after retries
+        surfaces as False, never True.
         """
-        r = await self._http.post(
-            f"/sell/inventory/v1/offer/{offer_id}/withdraw",
-            headers=await self._headers(),
-        )
-        if r.status_code == 204 or r.status_code < 300:
-            return True
-        # Parse the response and check both known "already inactive" error
-        # ids AND a message substring fallback (eBay's error taxonomy
-        # shifts — logging benign hits at INFO so we can update this list
-        # when new ones appear).
-        try:
-            body = r.json()
-        except ValueError:
-            body = {}
-        # 25001 = offer is not published; other 25xxx codes vary.
-        benign_ids = {25001}
-        errors = body.get("errors") or []
-        for e in errors:
-            eid = int(e.get("errorId") or 0)
-            msg = (e.get("message") or "").lower()
-            long_msg = (e.get("longMessage") or "").lower()
-            if eid in benign_ids or any(
-                phrase in msg or phrase in long_msg
-                for phrase in (
-                    "not published",
-                    "already withdrawn",
-                    "already ended",
-                    "listing is not active",
-                )
-            ):
-                logger.info(
-                    "withdraw offer %s — treating errorId %s as already-ended",
-                    offer_id,
-                    eid,
-                )
+        attempts = 4
+        backoff_s = 2.0
+        last_status = 0
+        last_text = ""
+        for attempt in range(1, attempts + 1):
+            r = await self._http.post(
+                f"/sell/inventory/v1/offer/{offer_id}/withdraw",
+                headers=await self._headers(),
+            )
+            if r.status_code == 204 or r.status_code < 300:
                 return True
-        logger.warning("withdraw offer %s failed %d: %s", offer_id, r.status_code, r.text[:300])
+            # Parse the response and check a message substring fallback for
+            # genuinely benign "already inactive" states (eBay's error
+            # taxonomy shifts — logging benign hits at INFO so we can update
+            # this list when new ones appear).
+            try:
+                body = r.json()
+            except ValueError:
+                body = {}
+            errors = body.get("errors") or []
+            for e in errors:
+                eid = int(e.get("errorId") or 0)
+                msg = (e.get("message") or "").lower()
+                long_msg = (e.get("longMessage") or "").lower()
+                if any(
+                    phrase in msg or phrase in long_msg
+                    for phrase in (
+                        "not published",
+                        "already withdrawn",
+                        "already ended",
+                        "listing is not active",
+                    )
+                ):
+                    logger.info(
+                        "withdraw offer %s — treating errorId %s as already-ended",
+                        offer_id,
+                        eid,
+                    )
+                    return True
+
+            last_status, last_text = r.status_code, r.text[:300]
+            body_lower = r.text.lower() if r.text else ""
+            is_eventual_error = (
+                bool(re.search(r'"errorid":\s*25001\b', body_lower))
+                or "core inventory service internal error" in body_lower
+            )
+            is_retryable = r.status_code >= 500 or r.status_code == 429 or is_eventual_error
+            if not is_retryable or attempt == attempts:
+                break
+            logger.warning(
+                "withdraw offer %s attempt %d/%d hit %d — retrying in %.1fs",
+                offer_id,
+                attempt,
+                attempts,
+                r.status_code,
+                backoff_s,
+            )
+            await asyncio.sleep(backoff_s)
+            backoff_s *= 2
+
+        logger.warning("withdraw offer %s failed %d: %s", offer_id, last_status, last_text)
         return False
 
     async def update_offer_price(
@@ -1059,7 +1088,13 @@ class EbayClient:
             )
             _extract_warnings(r, warnings)
             if r.status_code < 300:
-                return r.json().get("listingId", "")
+                listing_id = r.json().get("listingId", "")
+                if listing_id:
+                    return listing_id
+                raise RuntimeError(
+                    f"Offer {offer_id} publish returned {r.status_code} but "
+                    f"no listingId: {r.text[:500]}"
+                )
 
             # Already published → treat as success, fetch listingId.
             if b"already published" in r.content.lower():
