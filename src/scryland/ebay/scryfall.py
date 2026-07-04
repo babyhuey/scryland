@@ -54,6 +54,13 @@ class CardInfo:
 _NEGATIVE_CACHE = object()
 
 
+class ScryfallTransientError(Exception):
+    """Raised by `_get` for retryable failures (timeout, 429, 5xx) so
+    `find_card` can tell them apart from a definitive 404 "not found" and
+    avoid writing a false 7-day negative cache entry for a transient blip.
+    """
+
+
 def _cache_key(name: str, set_name: str | None, collector: str | None) -> str:
     raw = f"{name.lower()}|{(set_name or '').lower()}|{(collector or '').lstrip('0')}"
     # SHA-1 is used purely as a content-addressable cache key (hex digest
@@ -148,27 +155,38 @@ class ScryfallClient:
 
         # Try to translate Mythic's set_name → Scryfall set code via search.
         set_code = None
-        if set_name:
-            set_code = await self._set_name_to_code(set_name)
-
         info: CardInfo | None = None
-        if set_code and collector_number:
-            card = await self._get(f"/cards/{set_code}/{collector_number.lstrip('0') or '0'}")
-            if card:
-                info = self._to_info(card)
+        try:
+            if set_name:
+                set_code = await self._set_name_to_code(set_name)
 
-        if info is None:
-            params: dict[str, str] = {"exact": name}
-            if set_code:
-                params["set"] = set_code
-            card = await self._get("/cards/named", params=params)
-            if card:
-                info = self._to_info(card)
+            if set_code and collector_number:
+                card = await self._get(f"/cards/{set_code}/{collector_number.lstrip('0') or '0'}")
+                if card:
+                    info = self._to_info(card)
 
-        if info is None:
-            card = await self._get("/cards/named", params={"fuzzy": name})
-            if card:
-                info = self._to_info(card)
+            if info is None:
+                params: dict[str, str] = {"exact": name}
+                if set_code:
+                    params["set"] = set_code
+                card = await self._get("/cards/named", params=params)
+                if card:
+                    info = self._to_info(card)
+
+            if info is None:
+                card = await self._get("/cards/named", params={"fuzzy": name})
+                if card:
+                    info = self._to_info(card)
+        except ScryfallTransientError:
+            # Timeout/429/5xx — not a definitive "Scryfall doesn't have this
+            # card". Return a miss for this call but do NOT cache it, so the
+            # next lookup (retry, next run) hits the network again instead
+            # of being served a false 7-day negative cache entry.
+            logger.warning(
+                "Scryfall transient failure looking up '%s' — miss not cached",
+                name,
+            )
+            return None
 
         _cache_save(cache_key, info)
         return info
@@ -235,11 +253,14 @@ class ScryfallClient:
         await asyncio.sleep(_PER_CALL_DELAY_S)
         try:
             r = await self._client.get(path, params=params)
-        except Exception:
+        except Exception as exc:
             logger.warning("Scryfall request failed: %s", path, exc_info=True)
-            return None
+            raise ScryfallTransientError(str(exc)) from exc
         if r.status_code == 404:
             return None
+        if r.status_code == 429 or r.status_code >= 500:
+            logger.warning("Scryfall %d on %s: %s", r.status_code, path, r.text[:200])
+            raise ScryfallTransientError(f"Scryfall {r.status_code} on {path}")
         if r.status_code >= 400:
             logger.warning("Scryfall %d on %s: %s", r.status_code, path, r.text[:200])
             return None
