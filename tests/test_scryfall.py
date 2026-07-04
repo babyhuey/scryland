@@ -153,6 +153,63 @@ class TestFindCard:
         assert calls["n"] == after_first
         await sf.close()
 
+    async def test_429_then_success_not_cached_as_miss(self):
+        """A transient 429 must not poison the cache — the next call should
+        hit the network again and succeed, not be served a false 7-day miss."""
+        calls = {"n": 0}
+
+        def handler(req):
+            calls["n"] += 1
+            if "/sets" in str(req.url):
+                return httpx.Response(200, json={"data": []})
+            if calls["n"] == 1:
+                return httpx.Response(429)
+            return httpx.Response(200, json=_card_json())
+
+        sf = _make_client(httpx.MockTransport(handler))
+        info1 = await sf.find_card("Reprieve")
+        assert info1 is None
+        # Second call must hit the network again (not a cached miss).
+        info2 = await sf.find_card("Reprieve")
+        assert info2 is not None
+        assert info2.name == "Reprieve"
+        assert calls["n"] == 2
+        await sf.close()
+
+    async def test_5xx_then_success_not_cached_as_miss(self):
+        calls = {"n": 0}
+
+        def handler(req):
+            calls["n"] += 1
+            if "/sets" in str(req.url):
+                return httpx.Response(200, json={"data": []})
+            if calls["n"] == 1:
+                return httpx.Response(503)
+            return httpx.Response(200, json=_card_json())
+
+        sf = _make_client(httpx.MockTransport(handler))
+        assert await sf.find_card("Reprieve") is None
+        info2 = await sf.find_card("Reprieve")
+        assert info2 is not None
+        await sf.close()
+
+    async def test_connection_error_not_cached_as_miss(self):
+        calls = {"n": 0}
+
+        def handler(req):
+            calls["n"] += 1
+            if "/sets" in str(req.url):
+                return httpx.Response(200, json={"data": []})
+            if calls["n"] == 1:
+                raise httpx.ConnectError("boom")
+            return httpx.Response(200, json=_card_json())
+
+        sf = _make_client(httpx.MockTransport(handler))
+        assert await sf.find_card("Reprieve") is None
+        info2 = await sf.find_card("Reprieve")
+        assert info2 is not None
+        await sf.close()
+
     async def test_image_fallback_to_large_then_normal(self):
         def handler(req):
             if "/sets" in str(req.url):
