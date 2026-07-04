@@ -12,6 +12,7 @@ import logging
 from enum import StrEnum
 
 from playwright.async_api import Page
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from scryland.browser.flaky import retry_on_flaky
 
@@ -88,10 +89,10 @@ async def click_next_page(page: Page, timeout_ms: int = 15000) -> NextPageResult
     try:
         await page.wait_for_function(
             f"(before) => ({_SIGNATURE_JS})() !== before && ({_SIGNATURE_JS})() !== ''",
-            before,
+            arg=before,
             timeout=timeout_ms,
         )
-    except Exception:
+    except PlaywrightTimeoutError:
         logger.warning("Pagination Next click did not change page content within %dms", timeout_ms)
         return NextPageResult.STALLED
 

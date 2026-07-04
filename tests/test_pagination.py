@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
 from scryland.browser.pagination import NextPageResult, click_next_page
 
 
@@ -28,8 +31,11 @@ class TestClickNextPage:
         assert result is NextPageResult.ADVANCED
         # The captured "before" signature must be threaded through so the
         # predicate can detect a genuine change, not just networkidle.
-        args, _kwargs = page.wait_for_function.call_args
-        assert args[1] == "Viewing 1-25 of 100"
+        # wait_for_function's `arg` parameter is keyword-only in Playwright's
+        # Python API — passing it positionally raises TypeError on every
+        # real invocation.
+        _args, kwargs = page.wait_for_function.call_args
+        assert kwargs["arg"] == "Viewing 1-25 of 100"
 
     async def test_stalled_when_content_never_changes(self):
         # Regression test for the networkidle race: an already-idle page
@@ -39,9 +45,22 @@ class TestClickNextPage:
         # does within the timeout, that must surface as STALLED.
         page = MagicMock()
         page.evaluate = AsyncMock(side_effect=["Viewing 1-25 of 100", "clicked"])
-        page.wait_for_function = AsyncMock(side_effect=Exception("Timeout 15000ms exceeded"))
+        page.wait_for_function = AsyncMock(
+            side_effect=PlaywrightTimeoutError("Timeout 15000ms exceeded")
+        )
         result = await click_next_page(page)
         assert result is NextPageResult.STALLED
+
+    async def test_unexpected_exception_propagates(self):
+        # Only a genuine Playwright timeout should be converted to STALLED.
+        # Anything else (e.g. the TypeError that a wrong wait_for_function
+        # call signature would raise) must propagate instead of being
+        # silently swallowed and misreported as STALLED.
+        page = MagicMock()
+        page.evaluate = AsyncMock(side_effect=["Viewing 1-25 of 100", "clicked"])
+        page.wait_for_function = AsyncMock(side_effect=TypeError("unexpected positional arg"))
+        with pytest.raises(TypeError):
+            await click_next_page(page)
 
     async def test_disabled_next_is_last_page(self):
         page = MagicMock()
