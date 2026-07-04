@@ -734,9 +734,16 @@ class AddInventoryPage:
         await price_el.fill(f"{card.effective_price:.2f}")
         confirmed = await price_el.input_value()
         if not _is_plausible_price(confirmed):
-            logger.warning(
-                "Manual fill did not stick for '%s' (value='%s')", target_condition, confirmed
-            )
+            if card.effective_price <= 0:
+                logger.warning(
+                    "Computed price for '%s' is not usable ($%.2f) — not a manual-fill failure",
+                    target_condition,
+                    card.effective_price,
+                )
+            else:
+                logger.warning(
+                    "Manual fill did not stick for '%s' (value='%s')", target_condition, confirmed
+                )
             return False
         logger.info("Set price to $%.2f (from CSV)", card.effective_price)
         return True
