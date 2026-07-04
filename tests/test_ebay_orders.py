@@ -168,6 +168,31 @@ class TestIterRecentOrders:
         assert len(rows) == 1
         assert rows[0]["product_name"] == "Lightning Bolt NM"
 
+    async def test_short_middle_page_no_skipped_records(self):
+        """A page shorter than page_size mid-stream must not cause the next
+        request to jump past not-yet-retrieved records."""
+
+        def handler(req):
+            offset = int(req.url.params.get("offset", "0"))
+            if offset == 0:
+                orders = [{"orderId": f"O{i}"} for i in range(50)]
+                return httpx.Response(200, json={"orders": orders, "total": 120})
+            if offset == 50:
+                # Short page — only 30 records even though 40 more remain.
+                orders = [{"orderId": f"O{i}"} for i in range(50, 80)]
+                return httpx.Response(200, json={"orders": orders, "total": 120})
+            if offset == 80:
+                orders = [{"orderId": f"O{i}"} for i in range(80, 120)]
+                return httpx.Response(200, json={"orders": orders, "total": 120})
+            # Any other offset means we skipped or re-fetched records.
+            return httpx.Response(200, json={"orders": [], "total": 120})
+
+        client = _make_client(httpx.MockTransport(handler))
+        orders = await client.iter_recent_orders()
+        ids = {o["orderId"] for o in orders}
+        assert ids == {f"O{i}" for i in range(120)}
+        await client._http.aclose()
+
     async def test_http_error_returns_partial(self, caplog):
         import logging
 
