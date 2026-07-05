@@ -84,7 +84,7 @@ class EbayOrdersClient:
             more_by_total = total is not None and total > seen
             if not (has_next or more_by_total):
                 break
-            offset += page_size
+            offset += len(page)
         else:
             # Hitting the ceiling means we demonstrably missed orders —
             # treat as an error so surrounding code can surface it.

@@ -185,7 +185,10 @@ class BrowserSession:
             except Exception:
                 pass  # Browser already closed, nothing to save
 
-            await self._context.close()
+            try:
+                await self._context.close()
+            except Exception:
+                logger.debug("context.close() raised — continuing shutdown", exc_info=True)
             self._context = None
             self._page = None
         if self._playwright:

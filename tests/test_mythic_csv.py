@@ -113,6 +113,76 @@ class TestReadMythicCsv:
         assert bolt.price_usd_foil == Decimal("3.00")
         assert bolt.scryfall_id == "abc123"
 
+    def test_malformed_price_skips_row_not_whole_import(self, tmp_path):
+        """Decimal("$1.00") raises decimal.InvalidOperation, an
+        ArithmeticError — not a ValueError/KeyError. One bad row must be
+        skipped, not crash the whole read."""
+        csv_path = tmp_path / "malformed.csv"
+        fieldnames = [
+            "Card Name",
+            "Set Code",
+            "Set Name",
+            "Collector Number",
+            "Rarity",
+            "Language",
+            "Quantity",
+            "Condition",
+            "Finish",
+            "Altered",
+            "Signed",
+            "Misprint",
+            "Price (USD)",
+            "Price (USD Foil)",
+            "Price (USD Etched)",
+            "Scryfall ID",
+        ]
+        rows = [
+            {
+                "Card Name": "Bad Price Card",
+                "Set Code": "m21",
+                "Set Name": "Core Set 2021",
+                "Collector Number": "1",
+                "Rarity": "common",
+                "Language": "en",
+                "Quantity": "1",
+                "Condition": "NM",
+                "Finish": "nonfoil",
+                "Altered": "false",
+                "Signed": "false",
+                "Misprint": "false",
+                "Price (USD)": "$1.00",
+                "Price (USD Foil)": "0",
+                "Price (USD Etched)": "0",
+                "Scryfall ID": "bad1",
+            },
+            {
+                "Card Name": "Good Card",
+                "Set Code": "m21",
+                "Set Name": "Core Set 2021",
+                "Collector Number": "2",
+                "Rarity": "common",
+                "Language": "en",
+                "Quantity": "1",
+                "Condition": "NM",
+                "Finish": "nonfoil",
+                "Altered": "false",
+                "Signed": "false",
+                "Misprint": "false",
+                "Price (USD)": "1.00",
+                "Price (USD Foil)": "0",
+                "Price (USD Etched)": "0",
+                "Scryfall ID": "good1",
+            },
+        ]
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        cards = read_mythic_csv(csv_path)
+        assert len(cards) == 1
+        assert cards[0].card_name == "Good Card"
+
 
 class TestMythicCard:
     def test_effective_price_nonfoil(self):

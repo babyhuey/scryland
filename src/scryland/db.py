@@ -215,14 +215,18 @@ class InventoryDB:
         """
         # Fuzzy match inventory.product_name ↔ sales.product_name because
         # TCG names include parentheticals that the orders page strips.
+        # Both names are escaped before being embedded in a LIKE pattern —
+        # otherwise a literal '%' or '_' in a card name acts as a wildcard
+        # and over-matches, hiding rows that should be reclassified.
+        escape_expr = "REPLACE(REPLACE(REPLACE({col}, '\\', '\\\\'), '%', '\\%'), '_', '\\_')"
         cur = self.conn.execute(
             "UPDATE inventory SET status = 'removed' "
             "WHERE status = 'sold' "
             "AND NOT EXISTS ("
             "  SELECT 1 FROM sales "
             "  WHERE sales.product_name = inventory.product_name "
-            "     OR sales.product_name LIKE '%' || inventory.product_name || '%' "
-            "     OR inventory.product_name LIKE '%' || sales.product_name || '%' "
+            f"     OR sales.product_name LIKE '%' || {escape_expr.format(col='inventory.product_name')} || '%' ESCAPE '\\' "
+            f"     OR inventory.product_name LIKE '%' || {escape_expr.format(col='sales.product_name')} || '%' ESCAPE '\\' "
             ")"
         )
         if cur.rowcount:
@@ -281,7 +285,9 @@ class InventoryDB:
             updates = {
                 "quantity": listing.quantity,
                 "current_price": float(listing.current_price),
-                "tcg_low_price": float(listing.tcg_low_price) if listing.tcg_low_price else None,
+                "tcg_low_price": (
+                    float(listing.tcg_low_price) if listing.tcg_low_price is not None else None
+                ),
                 "market_price": float(listing.market_price) if listing.market_price else None,
                 "last_seen": now,
                 "status": "active",
@@ -303,7 +309,8 @@ class InventoryDB:
 
             self.conn.execute(
                 "UPDATE inventory SET "
-                "product_name=?, quantity=?, current_price=?, tcg_low_price=?, market_price=?, "
+                "product_name=?, quantity=?, current_price=?, "
+                "tcg_low_price=COALESCE(?, tcg_low_price), market_price=?, "
                 "last_seen=?, status=?, set_name=?, last_price_change=COALESCE(?, last_price_change) "
                 "WHERE id=?",
                 (
@@ -334,7 +341,7 @@ class InventoryDB:
                     finish,
                     listing.quantity,
                     float(listing.current_price),
-                    float(listing.tcg_low_price) if listing.tcg_low_price else None,
+                    float(listing.tcg_low_price) if listing.tcg_low_price is not None else None,
                     float(listing.market_price) if listing.market_price else None,
                     listing.tcgplayer_id,
                     now,
@@ -344,16 +351,27 @@ class InventoryDB:
             return True
 
     def is_listed(self, product_name: str, condition: str, finish: str = "") -> bool:
-        """Check if a card is already actively listed in our inventory."""
+        """Check if a card is already actively listed in our inventory.
+
+        Condition is compared with any embedded 'Foil' token stripped on
+        both sides — see `_bare_condition`.
+        """
         row = self.conn.execute(
             "SELECT id FROM inventory "
-            "WHERE product_name = ? AND condition = ? AND finish = ? AND status = 'active'",
-            (product_name, condition, finish),
+            "WHERE product_name = ? AND TRIM(REPLACE(condition, 'Foil', '')) = ? "
+            "AND finish = ? AND status = 'active'",
+            (product_name, _bare_condition(condition), finish),
         ).fetchone()
         return row is not None
 
     def is_sold(self, product_name: str, condition: str, finish: str = "") -> bool:
-        """Check if a card was sold/removed."""
+        """Check if a card was sold/removed.
+
+        NOTE: currently unused. Retains un-normalized exact-match condition
+        semantics — unlike is_known/is_listed it does NOT strip an embedded
+        'Foil' token, so it won't match rows sync() stored as e.g.
+        "Near Mint Foil". Normalize like its siblings before reviving.
+        """
         row = self.conn.execute(
             "SELECT id FROM inventory "
             "WHERE product_name = ? AND condition = ? AND finish = ? AND status = 'sold'",
@@ -362,10 +380,18 @@ class InventoryDB:
         return row is not None
 
     def is_known(self, product_name: str, condition: str, finish: str = "") -> str | None:
-        """Check if a card exists in the DB at all. Returns status or None."""
+        """Check if a card exists in the DB at all. Returns status or None.
+
+        Condition is compared with any embedded 'Foil' token stripped on
+        both sides so a bare condition ("Near Mint") matches a row that
+        `sync()` stored with the finish embedded ("Near Mint Foil") — see
+        `_bare_condition`. Without this, add-inventory's foil dedup check
+        never hits.
+        """
         row = self.conn.execute(
-            "SELECT status FROM inventory WHERE product_name = ? AND condition = ? AND finish = ?",
-            (product_name, condition, finish),
+            "SELECT status FROM inventory WHERE product_name = ? "
+            "AND TRIM(REPLACE(condition, 'Foil', '')) = ? AND finish = ?",
+            (product_name, _bare_condition(condition), finish),
         ).fetchone()
         return row["status"] if row else None
 
@@ -379,13 +405,16 @@ class InventoryDB:
         if self.is_listed(card_name, condition, finish):
             return True
 
+        bare_condition = _bare_condition(condition)
+
         # Check front face only for double-faced cards
         front_face = card_name.split("//")[0].strip()
         if front_face != card_name:
             row = self.conn.execute(
                 "SELECT id FROM inventory "
-                "WHERE product_name LIKE ? ESCAPE '\\' AND condition = ? AND finish = ? AND status = 'active'",
-                (f"%{_escape_like(front_face)}%", condition, finish),
+                "WHERE product_name LIKE ? ESCAPE '\\' "
+                "AND TRIM(REPLACE(condition, 'Foil', '')) = ? AND finish = ? AND status = 'active'",
+                (f"%{_escape_like(front_face)}%", bare_condition, finish),
             ).fetchone()
             if row:
                 return True
@@ -393,8 +422,9 @@ class InventoryDB:
         # Check if any active listing contains this card name
         row = self.conn.execute(
             "SELECT id FROM inventory "
-            "WHERE product_name LIKE ? ESCAPE '\\' AND condition = ? AND finish = ? AND status = 'active'",
-            (f"%{_escape_like(card_name)}%", condition, finish),
+            "WHERE product_name LIKE ? ESCAPE '\\' "
+            "AND TRIM(REPLACE(condition, 'Foil', '')) = ? AND finish = ? AND status = 'active'",
+            (f"%{_escape_like(card_name)}%", bare_condition, finish),
         ).fetchone()
         return row is not None
 
@@ -408,7 +438,7 @@ class InventoryDB:
                 listing.product_name,
                 listing.condition,
                 float(listing.current_price),
-                float(listing.tcg_low_price) if listing.tcg_low_price else None,
+                float(listing.tcg_low_price) if listing.tcg_low_price is not None else None,
                 float(listing.market_price) if listing.market_price else None,
                 now,
             ),
@@ -708,10 +738,28 @@ class InventoryDB:
             ),
         )
 
-        self._mark_inventory_sold(sale["product_name"], now)
+        self._mark_inventory_sold(sale["product_name"], now, sale.get("condition", ""))
 
         self.conn.commit()
         return True
+
+    def is_sale_recorded(
+        self,
+        order_number: str,
+        product_name: str,
+        condition: str = "",
+        marketplace: str = "tcgplayer",
+    ) -> bool:
+        """Return True if this order+product+condition+marketplace sale is
+        already stored. Lets a caller distinguish "just recorded this sweep"
+        from "already known" before doing a one-time side effect (e.g.
+        marking a listing sold) that shouldn't repeat on every sweep."""
+        row = self.conn.execute(
+            "SELECT id FROM sales WHERE order_number = ? AND product_name = ? "
+            "AND condition = ? AND marketplace = ?",
+            (order_number, product_name, condition, marketplace),
+        ).fetchone()
+        return row is not None
 
     def record_order_sales(self, sales: list[dict]) -> int:
         """Atomically record every product sold in a single order.
@@ -770,21 +818,33 @@ class InventoryDB:
                 marketplace,
             ),
         )
-        self._mark_inventory_sold(sale["product_name"], now)
+        self._mark_inventory_sold(sale["product_name"], now, sale.get("condition", ""))
         return True
 
-    def _mark_inventory_sold(self, product_name: str, now_iso: str) -> None:
+    def _mark_inventory_sold(self, product_name: str, now_iso: str, condition: str = "") -> None:
         """Mark active inventory rows matching `product_name` as sold.
 
-        Escapes LIKE wildcards so a card name containing `%` or `_`
-        doesn't cascade into unrelated rows.
+        Matches product_name by case-insensitive EQUALITY, not a `%name%`
+        substring scan — the old substring match marked unrelated cards sold
+        too (e.g. "Island" matching "Island of Wak-Wak"). When the sale's
+        condition is known, also constrains on it (and the finish embedded
+        in it, e.g. "Near Mint Foil") so selling one condition/finish
+        doesn't mark every other condition/finish of the same card sold.
         """
-        safe = _escape_like(product_name)
-        self.conn.execute(
-            "UPDATE inventory SET status = 'sold', last_seen = ? "
-            "WHERE product_name LIKE ? ESCAPE '\\' AND status = 'active'",
-            (now_iso, f"%{safe}%"),
-        )
+        if condition:
+            finish = "Foil" if "Foil" in condition else ""
+            self.conn.execute(
+                "UPDATE inventory SET status = 'sold', last_seen = ? "
+                "WHERE LOWER(product_name) = LOWER(?) AND condition = ? AND finish = ? "
+                "AND status = 'active'",
+                (now_iso, product_name, condition, finish),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE inventory SET status = 'sold', last_seen = ? "
+                "WHERE LOWER(product_name) = LOWER(?) AND status = 'active'",
+                (now_iso, product_name),
+            )
 
     def get_known_order_numbers(self) -> set[str]:
         """Get all order numbers already recorded."""
@@ -1101,6 +1161,18 @@ def canonical_key(
     num = (collector_number or "").lstrip("#").lstrip("0") or ""
     cond = condition.replace("Foil", "").strip().lower()
     return f"{name}|{set_part}|{num}|{cond}|{'F' if is_foil else 'N'}"
+
+
+def _bare_condition(condition: str) -> str:
+    """Strip an embedded 'Foil' finish token from a condition string.
+
+    `sync()` stores TCG's scraped condition with the finish embedded
+    ("Near Mint Foil"), while callers like add-inventory pass the bare
+    condition ("Near Mint") plus a separate finish. Mirrors the SQL-side
+    `TRIM(REPLACE(condition, 'Foil', ''))` so both sides normalize the
+    same way.
+    """
+    return condition.replace("Foil", "").strip()
 
 
 def _escape_like(s: str) -> str:

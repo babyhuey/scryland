@@ -46,6 +46,24 @@ def _empty_ebay_result(*, error: str | None = None) -> dict:
     }
 
 
+def _compute_undercut_price(lowest: float, min_price: float, our_ship: float) -> tuple[float, bool]:
+    """Undercut a competitor's total (item + shipping) price by $0.01, then
+    back out our shipping cost to get our item price.
+
+    Floored by eBay's hard $0.99 minimum and the user's --min-price so we
+    never list below either. Shared by ebay-preview and list-on-ebay so
+    the two commands never drift apart on the math. Returns
+    (price, floor_applied) — floor_applied is True when the raw undercut
+    fell below one of the floors, so callers can print "Match" vs
+    "Undercut" accordingly.
+    """
+    target_total = lowest - 0.01
+    undercut_target = round(target_total - our_ship, 2)
+    price = round(max(undercut_target, min_price, 0.99), 2)
+    floor_applied = undercut_target < max(min_price, 0.99)
+    return price, floor_applied
+
+
 async def _fast_update_ebay_price(
     ebay_client,
     db,
@@ -54,12 +72,17 @@ async def _fast_update_ebay_price(
     undercut: bool,
     min_price: float,
     console,
-) -> bool:
+) -> float | None:
     """Update an already-listed eBay offer's price without republishing.
 
     Skips Scryfall lookup, inventory_item PUT, and publish — ~5x faster than
     the full list-on-ebay pipeline. Also upserts the new price into the local
     ebay_listings table. Use when card data hasn't changed, only the price.
+
+    Returns the price that ended up applied (existing price if unchanged),
+    or None if the update failed. Callers must check `is not None`, not
+    truthiness — a returned price is never 0 but that's not guaranteed by
+    the type alone.
     """
     import logging
 
@@ -117,9 +140,34 @@ async def _fast_update_ebay_price(
         price = 0.99
 
     current_price = existing.get("price") or 0
+
+    # Big-drop guardrail — the watch sweep's undercut sweep skips (and
+    # warns on) drops this large instead of applying them; this fast path
+    # reprices immediately without one, so mirror that here rather than
+    # prompting (this runs non-interactively, mid-batch).
+    from scryland.pricing.guardrails import is_big_price_drop as _is_big_drop
+
+    max_pct = ebay_client._config.max_price_change_pct
+    max_abs = ebay_client._config.max_price_change_abs
+    if _is_big_drop(current_price, price, max_pct, max_abs):
+        logger.warning(
+            "Fast-update big price drop for %s: $%.2f -> $%.2f "
+            "(>%.0f%% and >$%.2f) — skipping, keeping current price",
+            card.card_name,
+            current_price,
+            price,
+            max_pct,
+            max_abs,
+        )
+        console.print(
+            f"  [yellow]Skip big drop ${current_price:.2f} → ${price:.2f} "
+            f"(>{max_pct:.0f}% AND >${max_abs:.2f})[/yellow]"
+        )
+        return current_price
+
     if abs(price - current_price) < 0.01:
         console.print(f"  [dim]Price unchanged at ${current_price:.2f} — skip[/dim]")
-        return True
+        return current_price
 
     ok = await ebay_client.update_offer_price(
         existing["offer_id"],
@@ -128,7 +176,7 @@ async def _fast_update_ebay_price(
     )
     if not ok:
         console.print("  [red]Fast update failed — try --full-republish[/red]")
-        return False
+        return None
 
     db.upsert_ebay_listing(
         sku=existing["sku"],
@@ -147,7 +195,7 @@ async def _fast_update_ebay_price(
         f"  [green]Updated ${current_price:.2f} → ${price:.2f}[/green] "
         f"[dim](fast path — no republish)[/dim]"
     )
-    return True
+    return price
 
 
 async def _end_tcg_listing_by_canonical(session, config, db, canonical_key: str) -> bool:
@@ -470,9 +518,24 @@ async def _ebay_watch_pass(
     tcg_delist_failed = 0
     for order in orders:
         rows = order_to_sales_rows(order)
+        # Snapshot which rows are already known *before* recording this
+        # order — record_order_sales only returns an aggregate count, not
+        # per-row detail, but marking our listing "sold" must only happen
+        # the sweep it's newly recorded. Otherwise a listing the seller
+        # manually re-published gets flipped back to "sold" every sweep
+        # this order is still "recent" per the API.
+        already_recorded = [
+            db.is_sale_recorded(
+                row["order_number"],
+                row["product_name"],
+                row.get("condition", ""),
+                row.get("_marketplace") or "tcgplayer",
+            )
+            for row in rows
+        ]
         n = db.record_order_sales(rows)
         new_ebay_sales += n
-        for row in rows:
+        for row, was_already_recorded in zip(rows, already_recorded, strict=True):
             sku = row.get("_sku")
             if not sku:
                 continue
@@ -491,7 +554,8 @@ async def _ebay_watch_pass(
                 )
                 continue
             key = ebay_listing["canonical_key"]
-            db.mark_ebay_listing_status(sku, "sold")
+            if not was_already_recorded:
+                db.mark_ebay_listing_status(sku, "sold")
             # Cross-delist on TCG — attempt for every SKU regardless of whether
             # this order was already recorded (idempotent; reconciliation
             # also covers this, but inline is cheaper).
@@ -2647,6 +2711,7 @@ def watch(
     logger = ctx.obj["logger"]
 
     async def _run() -> None:
+        nonlocal config
         import time
         from datetime import datetime
 
@@ -2672,6 +2737,18 @@ def watch(
                 f"\n[bold]Watching prices every {interval} minutes "
                 f"in {mode} mode. Press Ctrl+C to stop.[/bold]"
             )
+
+            # Resolve the eBay passphrase once for the whole watch process
+            # and cache it on `config`. _ebay_watch_pass calls
+            # _ebay_passphrase(config) every iteration; without this it
+            # would prompt (and block) on the first sweep of every run.
+            # Re-prompt on an empty answer — caching "" would defeat the
+            # `not config.ebay_passphrase` guard and re-prompt every sweep.
+            if (ebay or ebay_only) and config.ebay_app_id and not config.ebay_passphrase:
+                resolved_passphrase = ""
+                while not resolved_passphrase:
+                    resolved_passphrase = _ebay_passphrase(config)
+                config = config.model_copy(update={"ebay_passphrase": resolved_passphrase})
 
             run_count = 0
             # Cumulative stats across iterations — printed in each summary.
@@ -4204,7 +4281,13 @@ def ebay_refresh_titles(
                     is_foil=bool(row["is_foil"]),
                     effective_price=float(row["price"] or 0),
                 )
-                new_listing = build_listing(stub, info, float(row["price"] or 0))
+                try:
+                    new_listing = build_listing(stub, info, float(row["price"] or 0))
+                except ValueError as exc:
+                    logger.warning("Could not build listing for %s: %s", row["product_name"], exc)
+                    console.print(f"  [red]Skipped: {exc}[/red]")
+                    failed += 1
+                    continue
 
                 # Fetch the current title from eBay for a before/after view.
                 old_title = ""
@@ -4406,7 +4489,9 @@ def ebay_preview(
                         if lowest is None:
                             console.print("  [dim]Undercut: no eBay matches — using CSV[/dim]")
                         else:
-                            target = max(round(lowest - 0.01, 2), min_price)
+                            target, _ = _compute_undercut_price(
+                                lowest, min_price, config.ebay_shipping_cost
+                            )
                             console.print(
                                 f"  [dim]Undercut: eBay lowest ${lowest:.2f} → "
                                 f"would list at ${target:.2f}[/dim]"
@@ -4591,7 +4676,7 @@ def list_on_ebay(
                         )
                         continue
                     if fast_update and not draft and existing.get("offer_id"):
-                        ok = await _fast_update_ebay_price(
+                        new_price = await _fast_update_ebay_price(
                             ebay,
                             db,
                             card,
@@ -4600,13 +4685,13 @@ def list_on_ebay(
                             min_price,
                             console,
                         )
-                        if ok:
+                        if new_price is not None:
                             listed += 1
                             results.append(
                                 {
                                     "card": card,
                                     "status": "price updated",
-                                    "price": existing.get("price"),
+                                    "price": new_price,
                                     "listing_id": existing.get("listing_id"),
                                 }
                             )
@@ -4660,7 +4745,7 @@ def list_on_ebay(
                                 f"${min_price:.2f} and no eBay matches — "
                                 f"skipping[/yellow]"
                             )
-                            failed += 1
+                            skipped += 1
                             results.append(
                                 {
                                     "card": card,
@@ -4679,10 +4764,8 @@ def list_on_ebay(
                         # Floor honours BOTH eBay's hard $0.99 minimum and
                         # the user's --min-price.
                         our_ship = config.ebay_shipping_cost
-                        target_total = lowest - 0.01
-                        undercut_target = round(target_total - our_ship, 2)
-                        target = round(max(undercut_target, min_price, 0.99), 2)
-                        if undercut_target < max(min_price, 0.99):
+                        target, floor_applied = _compute_undercut_price(lowest, min_price, our_ship)
+                        if floor_applied:
                             our_total = target + our_ship
                             console.print(
                                 f"  [dim]Match: competitor total ${lowest:.2f}; "
@@ -4705,7 +4788,7 @@ def list_on_ebay(
                             f"  [yellow]CSV ${csv_price:.2f} below min "
                             f"${min_price:.2f} and --no-undercut — skipping[/yellow]"
                         )
-                        failed += 1
+                        skipped += 1
                         results.append(
                             {
                                 "card": card,
@@ -4726,7 +4809,21 @@ def list_on_ebay(
                     )
                     price = EBAY_HARD_MIN
 
-                listing = build_listing(card, info, price)
+                try:
+                    listing = build_listing(card, info, price)
+                except ValueError as exc:
+                    logger.warning("Could not build listing for %s: %s", card.card_name, exc)
+                    console.print(f"  [red]Skipped: {exc}[/red]")
+                    failed += 1
+                    results.append(
+                        {
+                            "card": card,
+                            "status": f"build failed: {exc}",
+                            "price": price,
+                            "listing_id": None,
+                        }
+                    )
+                    continue
 
                 try:
                     result = await ebay.publish_listing(listing, draft=draft)

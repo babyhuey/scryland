@@ -92,12 +92,22 @@ class LoginPage:
         console.print(f"Waiting up to {timeout_ms // 60_000} minutes...")
         console.print()
 
-        # Try to check "Remember Me" on the login page automatically
+        # Try to check "Remember Me" on the login page automatically. Check
+        # the actual checkbox state first — clicking unconditionally could
+        # uncheck an already-checked box (e.g. remembered from a prior run).
         try:
             remember_me = self._page.locator("text=Remember me")
             if await remember_me.count() > 0:
-                await remember_me.click()
-                logger.debug("Checked 'Remember Me' on login page")
+                checkbox = self._page.locator("text=Remember me >> input[type='checkbox']")
+                try:
+                    is_checked = (
+                        await checkbox.is_checked() if await checkbox.count() > 0 else False
+                    )
+                except Exception:
+                    is_checked = False
+                if not is_checked:
+                    await remember_me.click()
+                    logger.debug("Checked 'Remember Me' on login page")
         except Exception:
             logger.debug("Could not find/check 'Remember Me'", exc_info=True)
 
