@@ -7,6 +7,7 @@ against a stubbed environment without real network or browser.
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,6 +17,14 @@ from click.testing import CliRunner
 from scryland.cli import cli
 from scryland.db import InventoryDB
 from scryland.models import Listing
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    """Strip ANSI color escapes so Rich console output can be substring-
+    asserted regardless of the terminal's color capability."""
+    return _ANSI_RE.sub("", text)
 
 
 @pytest.fixture
@@ -294,7 +303,7 @@ class TestEbayPreview:
             ["ebay-preview", str(csv_path), "-n", "1", "--min-price", "1.00", "--undercut"],
         )
         assert result.exit_code == 0
-        assert "would list at $1.49" in result.output
+        assert "would list at $1.49" in _strip_ansi(result.output)
 
 
 @pytest.fixture
@@ -840,8 +849,9 @@ class TestListOnEbay:
             ["list-on-ebay", str(csv_path), "--no-undercut", "--min-price", "0.00"],
         )
         assert result.exit_code == 0
-        assert "1 listed" in result.output
-        assert "1 failed" in result.output
+        output = _strip_ansi(result.output)
+        assert "1 listed" in output
+        assert "1 failed" in output
 
 
 class TestComputeUndercutPrice:
@@ -1108,6 +1118,57 @@ class TestEbayRefreshTitles:
 
         result = runner.invoke(cli, ["ebay-refresh-titles", "--dry-run"])
         assert result.exit_code == 0
+
+    def test_build_listing_failure_skips_row_not_whole_batch(
+        self, runner, db_path, ebay_configured, mock_ebay, monkeypatch
+    ):
+        """A build_listing failure (e.g. an unknown TCG condition) on one
+        active listing must skip just that row with a loud log — not crash
+        the whole refresh batch."""
+        from scryland.db import InventoryDB
+
+        db = InventoryDB(db_path)
+        db.open()
+        for name, condition in (("Bad Card", "Bad Condition"), ("Good Card", "Near Mint")):
+            db.upsert_ebay_listing(
+                sku=f"SKU-{name}",
+                offer_id=f"OFF-{name}",
+                listing_id=f"LST-{name}",
+                product_name=name,
+                set_name="Core Set 2021",
+                collector_number="1",
+                condition=condition,
+                is_foil=False,
+                price=2.00,
+                quantity=1,
+                status="active",
+            )
+        db.close()
+
+        async def fake_find_card(self, name, set_name=None, collector_number=None):
+            return None
+
+        monkeypatch.setattr(
+            "scryland.ebay.scryfall.ScryfallClient.find_card",
+            fake_find_card,
+        )
+
+        from scryland.ebay import listing as listing_mod
+
+        orig_build_listing = listing_mod.build_listing
+
+        def flaky_build_listing(card, info, price):
+            if card.card_name == "Bad Card":
+                raise ValueError("Unknown TCG condition 'Bad Condition' for 'Bad Card'")
+            return orig_build_listing(card, info, price)
+
+        monkeypatch.setattr(listing_mod, "build_listing", flaky_build_listing)
+
+        result = runner.invoke(cli, ["ebay-refresh-titles"])
+        assert result.exit_code == 0
+        output = _strip_ansi(result.output)
+        assert "1 refreshed" in output
+        assert "1 failed" in output
 
 
 class TestDoctorCommand:
