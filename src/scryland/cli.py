@@ -4281,7 +4281,13 @@ def ebay_refresh_titles(
                     is_foil=bool(row["is_foil"]),
                     effective_price=float(row["price"] or 0),
                 )
-                new_listing = build_listing(stub, info, float(row["price"] or 0))
+                try:
+                    new_listing = build_listing(stub, info, float(row["price"] or 0))
+                except ValueError as exc:
+                    logger.warning("Could not build listing for %s: %s", row["product_name"], exc)
+                    console.print(f"  [red]Skipped: {exc}[/red]")
+                    failed += 1
+                    continue
 
                 # Fetch the current title from eBay for a before/after view.
                 old_title = ""
