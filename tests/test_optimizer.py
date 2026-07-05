@@ -153,6 +153,54 @@ class TestPennyDelist:
         pricing.apply_match_lowest.assert_not_called()
 
 
+class TestPriceFloor:
+    async def test_below_floor_skipped_not_applied(self, config, console, monkeypatch):
+        """A TCG lowest above the $0.01 delist threshold but below the
+        configured price floor must not be applied — neither matched nor
+        delisted."""
+        _, pricing = _patch_pages(
+            monkeypatch,
+            differentials=[
+                {
+                    "product_name": "Cheap Card",
+                    "condition": "Near Mint",
+                    "marketplace_price": 1.00,
+                    "lowest_listing": 0.10,  # above $0.01, below default floor $0.25
+                    "pct_differential": "-90%",
+                }
+            ],
+        )
+        session = _session_mock()
+
+        result = await run_price_differential_optimize(session, config, console)
+
+        assert result.skipped == 1
+        assert result.updated == 0
+        assert result.delisted == 0
+        pricing.apply_match_lowest.assert_not_called()
+        pricing.set_quantity_zero.assert_not_called()
+
+    async def test_at_or_above_floor_applies_normally(self, config, console, monkeypatch):
+        _, pricing = _patch_pages(
+            monkeypatch,
+            differentials=[
+                {
+                    "product_name": "Card A",
+                    "condition": "Near Mint",
+                    "marketplace_price": 1.00,
+                    "lowest_listing": 0.95,  # above the default $0.25 floor, small drop
+                    "pct_differential": "-5%",
+                }
+            ],
+        )
+        session = _session_mock()
+
+        result = await run_price_differential_optimize(session, config, console)
+
+        assert result.updated == 1
+        pricing.apply_match_lowest.assert_awaited_once_with("Near Mint")
+
+
 class TestSaveFailure:
     async def test_save_failure_increments_failed_count(self, config, console, monkeypatch):
         _, pricing = _patch_pages(

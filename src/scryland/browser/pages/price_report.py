@@ -15,6 +15,25 @@ logger = logging.getLogger("scryland")
 REPORT_URL = "https://store.tcgplayer.com/admin/report/pricedifferential"
 
 
+def _dedupe_new_rows(rows: list[dict], seen: set[tuple[str, str, str]]) -> list[dict]:
+    """Filter `rows` down to ones not already in `seen`, updating `seen` in place.
+
+    Keyed on (product_name, set_name, condition) — set name is required
+    because two different printings of the same card/condition (e.g. two
+    "Reprieve" printings from different sets) share (product_name,
+    condition) and would otherwise collide, silently dropping the second
+    printing's price differential.
+    """
+    new_rows = []
+    for r in rows:
+        key = (r["product_name"], r["set_name"], r["condition"])
+        if key in seen:
+            continue
+        seen.add(key)
+        new_rows.append(r)
+    return new_rows
+
+
 class PriceReportPage:
     """Scrapes the Price Differential Report to find cards needing updates."""
 
@@ -39,7 +58,7 @@ class PriceReportPage:
     async def get_differentials(self) -> list[dict]:
         """Scrape all rows from the report results, across all pages."""
         all_results: list[dict] = []
-        seen: set[tuple[str, str]] = set()
+        seen: set[tuple[str, str, str]] = set()
         max_pages = 100
 
         for page_num in range(1, max_pages + 1):
@@ -72,16 +91,10 @@ class PriceReportPage:
                 return results;
             }""")
 
-            new_count = 0
-            for r in results:
-                key = (r["product_name"], r["condition"])
-                if key in seen:
-                    continue
-                seen.add(key)
-                all_results.append(r)
-                new_count += 1
+            new_rows = _dedupe_new_rows(results, seen)
+            all_results.extend(new_rows)
 
-            logger.debug("Report page %d: %d rows (%d new)", page_num, len(results), new_count)
+            logger.debug("Report page %d: %d rows (%d new)", page_num, len(results), len(new_rows))
 
             nxt = await click_next_page(self._page)
             if nxt is NextPageResult.LAST_PAGE:
@@ -97,26 +110,31 @@ class PriceReportPage:
         return all_results
 
     async def click_manage_for_row(self, product_name: str) -> bool:
-        """Click the Manage button for a product, paginating until found."""
+        """Click the Manage button for a product, paginating until found.
+
+        Matches the row by exact equality on the name cell (cells[0], per
+        get_differentials' column mapping) — a substring match let a target
+        like "Reprieve" match "Reprieve's Haunt" instead. If a matching
+        row has no control whose text/value is exactly "Manage", we refuse
+        to click anything in that row rather than grabbing the first
+        anchor/button/input (which could be the product name link) — and
+        keep scanning remaining rows, since two same-name printings can
+        appear on one page.
+        """
         max_pages = 100
         for _ in range(max_pages):
             clicked = await self._page.evaluate(
                 """(targetName) => {
                 const rows = document.querySelectorAll('table tbody tr');
                 for (const row of rows) {
-                    if (!row.innerText.includes(targetName)) continue;
-                    const btn = row.querySelector(
-                        "a, button, input[value='Manage']"
-                    );
-                    if (!btn) continue;
-                    const text = (btn.textContent || btn.value || '').trim();
-                    if (text !== 'Manage') {
-                        const nested = row.querySelector("input[value='Manage']");
-                        if (nested) { nested.click(); return true; }
-                        continue;
+                    const cells = row.querySelectorAll('td');
+                    const name = (cells[0] ? cells[0].innerText : '').trim();
+                    if (name !== targetName) continue;
+                    const els = row.querySelectorAll('a, button, input');
+                    for (const el of els) {
+                        const text = (el.textContent || el.value || '').trim();
+                        if (text === 'Manage') { el.click(); return true; }
                     }
-                    btn.click();
-                    return true;
                 }
                 return false;
             }""",

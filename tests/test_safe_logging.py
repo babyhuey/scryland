@@ -66,12 +66,58 @@ class TestSensitiveDataFilter:
         assert record.msg == "no args"
 
     def test_non_string_args_untouched(self):
+        """Non-sensitive args still format correctly — the filter now
+        pre-formats the message (clearing record.args) rather than leaving
+        the raw args tuple for a later % substitution."""
         f = SensitiveDataFilter()
         record = self._make_record("count=%d", (42,))
         f.filter(record)
-        assert record.args == (42,)
+        assert record.getMessage() == "count=42"
 
     def test_always_returns_true(self):
         f = SensitiveDataFilter()
         record = self._make_record("test")
         assert f.filter(record) is True
+
+    def test_percent_style_arg_is_redacted_without_formatting_error(self):
+        """Redacting the raw '%s'-template can match-and-consume the
+        placeholder itself (e.g. "token=%s" matches the sensitive-key
+        pattern whole), corrupting the template so %-formatting later
+        raises. Must redact the fully formatted message instead."""
+        f = SensitiveDataFilter()
+        record = self._make_record("token=%s", ("SECRET",))
+        f.filter(record)
+        formatted = record.getMessage()  # must not raise
+        assert "SECRET" not in formatted
+        assert "[REDACTED]" in formatted
+
+    def test_mismatched_placeholders_do_not_raise_out_of_filter(self):
+        """Filter.filter() runs OUTSIDE logging's emit() try/except safety
+        net. A malformed log call (wrong %s/arg count) must not raise out
+        of filter() into the caller — the record must be left untouched so
+        logging's own emit-time error handling ("--- Logging error ---")
+        applies, same degradation as stock logging."""
+        f = SensitiveDataFilter()
+        record = self._make_record("a=%s b=%s", ("only-one",))
+        assert f.filter(record) is True  # must not raise
+        # Record untouched: template + args intact for emit-time handling.
+        assert record.msg == "a=%s b=%s"
+        assert record.args == ("only-one",)
+
+    def test_mismatched_placeholders_handled_like_stock_logging(self, capsys):
+        """End-to-end: a malformed log call through a real logger+handler
+        with the filter attached must not raise, and must be routed to
+        logging's handleError path (stderr), not crash the caller."""
+        logger = logging.getLogger("scryland.test_safe_logging_malformed")
+        logger.handlers.clear()
+        logger.propagate = False
+        handler = logging.StreamHandler()
+        handler.addFilter(SensitiveDataFilter())
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        try:
+            logger.info("a=%s b=%s", "only-one")  # must not raise
+        finally:
+            logger.handlers.clear()
+        err = capsys.readouterr().err
+        assert "Logging error" in err

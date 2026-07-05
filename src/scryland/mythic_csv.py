@@ -9,7 +9,7 @@ from __future__ import annotations
 import csv
 import logging
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 logger = logging.getLogger("scryland")
@@ -101,7 +101,7 @@ def read_mythic_csv(path: Path, english_only: bool = True) -> list[MythicCard]:
                     scryfall_id=row.get("Scryfall ID", "").strip(),
                 )
                 cards.append(card)
-            except (ValueError, KeyError) as e:
+            except (ValueError, KeyError, InvalidOperation) as e:
                 logger.warning("Skipping unparseable row: %s", e)
 
     logger.info("Read %d cards from %s", len(cards), path)

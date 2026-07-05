@@ -24,18 +24,28 @@ class SensitiveDataFilter(logging.Filter):
     """Filter that redacts sensitive data from log records."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.msg, str):
-            record.msg = self._redact(record.msg)
         if record.args:
-            if isinstance(record.args, dict):
-                record.args = {
-                    k: self._redact(str(v)) if isinstance(v, str) else v
-                    for k, v in record.args.items()
-                }
-            elif isinstance(record.args, tuple):
-                record.args = tuple(
-                    self._redact(str(a)) if isinstance(a, str) else a for a in record.args
-                )
+            # Redact the fully formatted message, not the raw %-style
+            # template — redacting the template first can match-and-consume
+            # a placeholder itself (e.g. "token=%s" matches the sensitive-key
+            # pattern whole), corrupting it so %-formatting later raises.
+            # Clear args afterward so nothing re-formats the already-
+            # substituted message.
+            #
+            # Guarded: filter() runs OUTSIDE logging's emit() try/except
+            # safety net, so a malformed log call (wrong %s/arg count)
+            # raising here would propagate into the caller — e.g. aborting
+            # an unattended watch loop — instead of degrading to logging's
+            # own "--- Logging error ---" handling. On failure, leave the
+            # record untouched so emit-time error handling applies.
+            try:
+                formatted = self._redact(record.getMessage())
+            except Exception:
+                return True
+            record.msg = formatted
+            record.args = None
+        elif isinstance(record.msg, str):
+            record.msg = self._redact(record.msg)
         return True
 
     def _redact(self, text: str) -> str:

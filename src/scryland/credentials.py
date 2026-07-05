@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -45,12 +46,24 @@ def _derive_key(passphrase: str, salt: bytes) -> bytes:
     return base64.urlsafe_b64encode(kdf.derive(passphrase.encode()))
 
 
+def _write_secure(path: Path, data: bytes) -> None:
+    """Write `data` to `path`, creating it with 0600 permissions atomically.
+
+    write_bytes() followed by chmod(0o600) leaves a brief window where the
+    file exists with default (umask) permissions before being narrowed.
+    os.open with O_CREAT sets the mode at creation time instead.
+    """
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+
+
 def save_credentials(
     username: str, password: str, passphrase: str, *, base_dir: Path | None = None
 ) -> None:
     """Encrypt and save credentials to disk."""
-    import os
-
     salt = os.urandom(16)
     key = _derive_key(passphrase, salt)
     fernet = Fernet(key)
@@ -60,13 +73,11 @@ def save_credentials(
 
     # Save salt
     salt_path = _resolve(_SALT_FILE, base_dir)
-    salt_path.write_bytes(salt)
-    salt_path.chmod(0o600)
+    _write_secure(salt_path, salt)
 
     # Save encrypted credentials
     cred_path = _resolve(_CREDENTIALS_FILE, base_dir)
-    cred_path.write_bytes(encrypted)
-    cred_path.chmod(0o600)
+    _write_secure(cred_path, encrypted)
 
     logger.info("Credentials saved (encrypted)")
 

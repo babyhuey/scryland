@@ -146,6 +146,23 @@ class TestIsListed:
         assert db.is_listed("Card A", "Near Mint") is False
 
 
+class TestIsKnown:
+    def test_returns_none_when_unknown(self, db):
+        assert db.is_known("Ghost Card", "Near Mint", "") is None
+
+    def test_bare_condition_matches_foil_row_synced_with_embedded_condition(self, db):
+        """sync() stores the scraped condition with the finish embedded
+        ("Near Mint Foil"), while add-inventory looks it up with the bare
+        condition ("Near Mint") plus a separate finish ("Foil") — these must
+        still match so foil cards dedup correctly."""
+        db.sync([_make_listing(product_name="Sol Ring", condition="Near Mint Foil")])
+        assert db.is_known("Sol Ring", "Near Mint", "Foil") == "active"
+
+    def test_non_foil_still_matches(self, db):
+        db.sync([_make_listing(product_name="Sol Ring", condition="Near Mint")])
+        assert db.is_known("Sol Ring", "Near Mint", "") == "active"
+
+
 class TestIsListedFuzzy:
     def test_exact_match(self, db):
         db.upsert_listing(_make_listing(product_name="Lightning Bolt"))
@@ -172,6 +189,12 @@ class TestIsListedFuzzy:
         db.conn.commit()
         assert db.is_listed_fuzzy("Sol Ring", "Near Mint", "Foil") is True
         assert db.is_listed_fuzzy("Sol Ring", "Near Mint", "") is False
+
+    def test_bare_condition_matches_row_synced_with_embedded_foil_condition(self, db):
+        """Same add-inventory-vs-sync() mismatch as TestIsKnown, but for the
+        fuzzy path add-inventory also calls."""
+        db.sync([_make_listing(product_name="Sol Ring", condition="Near Mint Foil")])
+        assert db.is_listed_fuzzy("Sol Ring", "Near Mint", "Foil") is True
 
 
 class TestSync:
@@ -313,6 +336,37 @@ class TestUpdateTcgPrice:
         assert row["current_price"] == pytest.approx(2.00)
 
 
+class TestIsSaleRecorded:
+    def test_false_before_recording(self, db):
+        assert db.is_sale_recorded("ORD-1", "Bolt", "Near Mint", "ebay") is False
+
+    def test_true_after_recording(self, db):
+        db.record_order_sales(
+            [
+                {
+                    "order_number": "ORD-1",
+                    "product_name": "Bolt",
+                    "condition": "Near Mint",
+                    "_marketplace": "ebay",
+                }
+            ]
+        )
+        assert db.is_sale_recorded("ORD-1", "Bolt", "Near Mint", "ebay") is True
+
+    def test_scoped_to_marketplace(self, db):
+        db.record_order_sales(
+            [
+                {
+                    "order_number": "ORD-1",
+                    "product_name": "Bolt",
+                    "condition": "Near Mint",
+                    "_marketplace": "tcgplayer",
+                }
+            ]
+        )
+        assert db.is_sale_recorded("ORD-1", "Bolt", "Near Mint", "ebay") is False
+
+
 class TestInsertSaleRowMarketplaceDedup:
     def test_same_order_different_marketplace_both_recorded(self, db):
         """TCG and eBay sales for the same order/card must both be stored."""
@@ -419,6 +473,64 @@ class TestFalsyZeroPriceTracking:
         assert report.price_changed[0]["new_price"] == pytest.approx(1.50)
 
 
+class TestTcgLowPriceFalsyZeroAndPreserve:
+    """`float(x) if x else None` treats Decimal("0") as missing, and a
+    plain UPDATE overwrites a known tcg_low_price with NULL when a later
+    scrape lacks it."""
+
+    def test_zero_price_stored_as_zero_not_null_on_insert(self, db):
+        listing = _make_listing(
+            product_name="Bolt", condition="Near Mint", tcg_low_price=Decimal("0")
+        )
+        db.upsert_listing(listing, "")
+        db.conn.commit()
+        row = db.conn.execute(
+            "SELECT tcg_low_price FROM inventory WHERE product_name = 'Bolt'"
+        ).fetchone()
+        assert row["tcg_low_price"] == pytest.approx(0.0)
+
+    def test_zero_price_stored_as_zero_not_null_on_update(self, db):
+        listing = _make_listing(
+            product_name="Bolt", condition="Near Mint", tcg_low_price=Decimal("1.00")
+        )
+        db.upsert_listing(listing, "")
+        db.conn.commit()
+
+        repriced = _make_listing(
+            product_name="Bolt", condition="Near Mint", tcg_low_price=Decimal("0")
+        )
+        db.upsert_listing(repriced, "")
+        row = db.conn.execute(
+            "SELECT tcg_low_price FROM inventory WHERE product_name = 'Bolt'"
+        ).fetchone()
+        assert row["tcg_low_price"] == pytest.approx(0.0)
+
+    def test_update_with_none_preserves_prior_tcg_low_price(self, db):
+        listing = _make_listing(
+            product_name="Bolt", condition="Near Mint", tcg_low_price=Decimal("2.50")
+        )
+        db.upsert_listing(listing, "")
+        db.conn.commit()
+
+        rescraped = _make_listing(product_name="Bolt", condition="Near Mint", tcg_low_price=None)
+        db.upsert_listing(rescraped, "")
+        row = db.conn.execute(
+            "SELECT tcg_low_price FROM inventory WHERE product_name = 'Bolt'"
+        ).fetchone()
+        assert row["tcg_low_price"] == pytest.approx(2.50)
+
+    def test_record_price_stores_zero_tcg_low_not_null(self, db):
+        listing = _make_listing(
+            product_name="Bolt", condition="Near Mint", tcg_low_price=Decimal("0")
+        )
+        db.record_price(listing)
+        db.conn.commit()
+        row = db.conn.execute(
+            "SELECT tcg_low FROM price_history WHERE product_name = 'Bolt'"
+        ).fetchone()
+        assert row["tcg_low"] == pytest.approx(0.0)
+
+
 class TestIsListedFuzzyLikeEscape:
     def test_underscore_in_name_does_not_match_wildcard(self, db):
         """A card name with _ should not match a card with a different character there."""
@@ -464,6 +576,53 @@ class TestSyncTransactionSafety:
         assert row["status"] == "active"
 
 
+class TestMarkInventorySoldPrecision:
+    """_mark_inventory_sold must not over-match: exact name (case-insensitive),
+    constrained by condition/finish when known — not a `%name%` substring
+    scan across every condition/finish of a card."""
+
+    def test_nm_sale_does_not_mark_other_conditions_sold(self, db):
+        db.sync(
+            [
+                _make_listing(product_name="Sol Ring", condition="Near Mint"),
+                _make_listing(product_name="Sol Ring", condition="Lightly Played"),
+                _make_listing(product_name="Sol Ring", condition="Near Mint Foil"),
+            ]
+        )
+        db.record_order_sales(
+            [{"order_number": "ORD-1", "product_name": "Sol Ring", "condition": "Near Mint"}]
+        )
+        rows = {
+            r["condition"]: r["status"]
+            for r in db.conn.execute(
+                "SELECT condition, status FROM inventory WHERE product_name = 'Sol Ring'"
+            ).fetchall()
+        }
+        assert rows["Near Mint"] == "sold"
+        assert rows["Lightly Played"] == "active"
+        assert rows["Near Mint Foil"] == "active"
+
+    def test_island_sale_does_not_mark_island_of_wak_wak(self, db):
+        db.sync(
+            [
+                _make_listing(product_name="Island", condition="Near Mint"),
+                _make_listing(product_name="Island of Wak-Wak", condition="Near Mint"),
+            ]
+        )
+        db.record_order_sales(
+            [{"order_number": "ORD-2", "product_name": "Island", "condition": "Near Mint"}]
+        )
+        rows = {
+            r["product_name"]: r["status"]
+            for r in db.conn.execute(
+                "SELECT product_name, status FROM inventory "
+                "WHERE product_name IN ('Island', 'Island of Wak-Wak')"
+            ).fetchall()
+        }
+        assert rows["Island"] == "sold"
+        assert rows["Island of Wak-Wak"] == "active"
+
+
 class TestFindInventoryByCanonicalIncludeRemoved:
     def test_active_found_without_flag(self, db):
         from scryland.db import canonical_key
@@ -497,3 +656,35 @@ class TestFindInventoryByCanonicalIncludeRemoved:
         db.conn.commit()
         key = canonical_key("Fireball", "Near Mint", False)
         assert db.find_inventory_by_canonical(key, include_removed=True) is not None
+
+
+class TestReclassifyFalseSoldLikeEscape:
+    """_reclassify_false_sold concatenates product names into a LIKE
+    pattern without escaping '%'/'_' — a name containing '%' turns into a
+    wildcard, over-matching a sale that doesn't really correspond and
+    incorrectly leaving the row 'sold' instead of reclassifying it."""
+
+    def test_percent_in_name_does_not_over_match(self, db):
+        now = "2026-01-01T00:00:00"
+        db.conn.execute(
+            "INSERT INTO inventory (product_name, condition, finish, status, "
+            "current_price, quantity, first_seen, last_seen) "
+            "VALUES ('100% Foil Promo', 'Near Mint', '', 'sold', 1.00, 1, ?, ?)",
+            (now, now),
+        )
+        # Does NOT literally contain "100% Foil Promo" — would only match
+        # if the '%' in the inventory name were (incorrectly) treated as a
+        # SQL wildcard instead of a literal character.
+        db.conn.execute(
+            "INSERT INTO sales (order_number, order_date, product_name, condition, recorded_at) "
+            "VALUES ('X', ?, '100XXXXXX Foil Promo', 'Near Mint', ?)",
+            (now, now),
+        )
+        db.conn.commit()
+
+        db._reclassify_false_sold()
+
+        row = db.conn.execute(
+            "SELECT status FROM inventory WHERE product_name = '100% Foil Promo'"
+        ).fetchone()
+        assert row["status"] == "removed"
