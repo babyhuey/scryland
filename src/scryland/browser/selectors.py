@@ -37,7 +37,6 @@ class Selectors:
 
     # --- Manage/Product page (after clicking Manage) ---
     BACK_TO_INVENTORY = "a:has-text('Back to Inventory')"
-    BTN_SAVE = "a:has-text('Save'), button:has-text('Save'), input[value='Save']"
 
     # Live prices bar at top
     LIVE_PRICES_LOW = ".low-price, text=/Low/"
